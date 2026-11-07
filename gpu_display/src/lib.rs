@@ -38,6 +38,8 @@ mod gpu_display_stub;
 mod gpu_display_win;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 mod gpu_display_wl;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub mod gvm_input;
 #[cfg(feature = "x")]
 mod gpu_display_x;
 #[cfg(any(windows, feature = "x"))]

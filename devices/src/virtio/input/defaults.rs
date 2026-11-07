@@ -52,6 +52,27 @@ pub fn new_multitouch_trackpad_config(
     )
 }
 
+/// iceland gvm: an absolute pointer like QEMU's virtio-tablet (ABS_X/Y in buffer pixels, left / right /
+/// middle buttons, vertical and horizontal wheel) for the window's tablet / touchpad input modes.
+pub fn new_tablet_config(idx: u32, width: u32, height: u32, name: Option<&str>) -> VirtioInputConfig {
+    let name = name.map(str::to_owned).unwrap_or(format!("Crosvm Virtio Tablet {idx}"));
+    let mut events: BTreeMap<u16, virtio_input_bitmap> = BTreeMap::new();
+    events.insert(EV_KEY, virtio_input_bitmap::from_bits(&[BTN_LEFT, BTN_RIGHT, BTN_MIDDLE]));
+    events.insert(EV_ABS, virtio_input_bitmap::from_bits(&[ABS_X, ABS_Y]));
+    events.insert(EV_REL, virtio_input_bitmap::from_bits(&[REL_WHEEL, REL_HWHEEL]));
+    let mut absinfo: BTreeMap<u16, virtio_input_absinfo> = BTreeMap::new();
+    absinfo.insert(ABS_X, virtio_input_absinfo::new(0, width, 0, 0));
+    absinfo.insert(ABS_Y, virtio_input_absinfo::new(0, height, 0, 0));
+    VirtioInputConfig::new(
+        virtio_input_device_ids::new(0, 0, 0, 0),
+        name,
+        format!("virtio-tablet-{idx}"),
+        virtio_input_bitmap::new([0u8; 128]),
+        events,
+        absinfo,
+    )
+}
+
 /// Instantiates a VirtioInputConfig object with the default configuration for a mouse.
 /// It supports left, right and middle buttons, as wel as X, Y and wheel relative axes.
 pub fn new_mouse_config(idx: u32) -> VirtioInputConfig {

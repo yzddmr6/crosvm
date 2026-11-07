@@ -51,6 +51,12 @@ const uint32_t DWL_EVENT_TYPE_POINTER_BUTTON = 0x13;
 const uint32_t DWL_EVENT_TYPE_TOUCH_DOWN     = 0x20;
 const uint32_t DWL_EVENT_TYPE_TOUCH_UP       = 0x21;
 const uint32_t DWL_EVENT_TYPE_TOUCH_MOTION   = 0x22;
+/* iceland gvm (input modes, 0.2-6): raw pointer + real multi-finger touch; the mode logic is gvm_input.rs */
+const uint32_t DWL_EVENT_TYPE_POINTER_AXIS   = 0x14;
+const uint32_t DWL_EVENT_TYPE_FINGER_DOWN    = 0x30;
+const uint32_t DWL_EVENT_TYPE_FINGER_UP      = 0x31;
+const uint32_t DWL_EVENT_TYPE_FINGER_MOTION  = 0x32;
+const uint32_t DWL_EVENT_TYPE_FINGER_CANCEL  = 0x33;
 
 const uint32_t DWL_SURFACE_FLAG_RECEIVE_INPUT = 1 << 0;
 const uint32_t DWL_SURFACE_FLAG_HAS_ALPHA     = 1 << 1;
@@ -85,6 +91,7 @@ struct output {
 	uint32_t current_scale;
 	uint32_t device_scale_factor;
 	bool internal;
+	char name[64]; /* iceland gvm: wl_output v4 name (e.g. "DSI-1", "DP-1") for CROSVM_GVM_OUTPUT */
 };
 
 struct input {
@@ -95,6 +102,8 @@ struct input {
 	int32_t pointer_x;
 	int32_t pointer_y;
 	bool pointer_lbutton_state;
+	struct wl_touch *wl_touch;       /* iceland gvm */
+	struct wl_surface *touch_surface;
 };
 
 typedef void (*dwl_error_callback_type)(const char *message);
@@ -202,11 +211,27 @@ static void output_scale(void *data, struct wl_output *wl_output,
 	output->current_scale = 1000 * scale_factor;
 }
 
+static void output_name(void *data, struct wl_output *wl_output, const char *name)
+{
+	(void)wl_output;
+	struct output *output = (struct output *)data;
+	snprintf(output->name, sizeof(output->name), "%s", name ? name : "");
+}
+
+static void output_description(void *data, struct wl_output *wl_output, const char *description)
+{
+	(void)data;
+	(void)wl_output;
+	(void)description;
+}
+
 static const struct wl_output_listener output_listener = {
     .geometry = output_geometry,
     .mode = output_mode,
     .done = output_done,
-    .scale = output_scale};
+    .scale = output_scale,
+    .name = output_name,
+    .description = output_description};
 
 static void aura_output_scale(void *data, struct zaura_output *aura_output,
 			      uint32_t flags, uint32_t scale)
@@ -364,6 +389,31 @@ static const struct wl_keyboard_listener wl_keyboard_listener = {
 	.repeat_info = wl_keyboard_repeat_info,
 };
 
+/* iceland gvm: surface (logical) coordinates -> buffer pixels, the guest devices' coordinate space
+ * (up to v10i the window's logical coordinates went to a device sized in buffer pixels) */
+static int32_t gvm_to_buffer(struct wl_surface *surface, wl_fixed_t v)
+{
+	double scale = 1.0;
+	if (surface) {
+		struct dwl_surface *ds = (struct dwl_surface *)wl_surface_get_user_data(surface);
+		if (ds && ds->scale > 0)
+			scale = ds->scale;
+	}
+	return (int32_t)(wl_fixed_to_double(v) * scale);
+}
+
+static void gvm_push(struct dwl_context *context, const void *surface, uint32_t type,
+		     int32_t p0, int32_t p1, int32_t p2)
+{
+	struct dwl_event event = {0};
+	event.surface_descriptor = surface;
+	event.event_type = type;
+	event.params[0] = p0;
+	event.params[1] = p1;
+	event.params[2] = p2;
+	dwl_context_push_event(context, &event);
+}
+
 static void pointer_enter_handler(void *data, struct wl_pointer *wl_pointer,
 				  uint32_t serial, struct wl_surface *surface,
 				  wl_fixed_t x, wl_fixed_t y)
@@ -374,8 +424,9 @@ static void pointer_enter_handler(void *data, struct wl_pointer *wl_pointer,
 	(void)serial;
 
 	input->pointer_input_surface = surface;
-	input->pointer_x = wl_fixed_to_int(x);
-	input->pointer_y = wl_fixed_to_int(y);
+	input->pointer_x = gvm_to_buffer(surface, x);
+	input->pointer_y = gvm_to_buffer(surface, y);
+	gvm_push(context, surface, DWL_EVENT_TYPE_POINTER_MOVE, input->pointer_x, input->pointer_y, 0);
 }
 
 static void pointer_leave_handler(void *data, struct wl_pointer *wl_pointer,
@@ -395,19 +446,15 @@ static void pointer_motion_handler(void *data, struct wl_pointer *wl_pointer,
 {
 	struct dwl_context *context = (struct dwl_context*)data;
 	struct input *input = &context->input;
-	struct dwl_event event = {0};
 	(void)wl_pointer;
 	(void)time;
 
-	input->pointer_x = wl_fixed_to_int(x);
-	input->pointer_y = wl_fixed_to_int(y);
-	if (input->pointer_lbutton_state) {
-		event.surface_descriptor = input->pointer_input_surface;
-		event.event_type = DWL_EVENT_TYPE_TOUCH_MOTION;
-		event.params[0] = input->pointer_x;
-		event.params[1] = input->pointer_y;
-		dwl_context_push_event(context, &event);
-	}
+	if (!input->pointer_input_surface)
+		return;
+	input->pointer_x = gvm_to_buffer(input->pointer_input_surface, x);
+	input->pointer_y = gvm_to_buffer(input->pointer_input_surface, y);
+	gvm_push(context, input->pointer_input_surface, DWL_EVENT_TYPE_POINTER_MOVE,
+		 input->pointer_x, input->pointer_y, 0);
 }
 
 static void pointer_button_handler(void *data, struct wl_pointer *wl_pointer,
@@ -420,17 +467,13 @@ static void pointer_button_handler(void *data, struct wl_pointer *wl_pointer,
 	(void)time;
 	(void)serial;
 
-	// we track only the left mouse button since we emulate a single touch device
-	if (button == BTN_LEFT) {
+	if (!input->pointer_input_surface)
+		return;
+	if (button == BTN_LEFT)
 		input->pointer_lbutton_state = state != 0;
-		struct dwl_event event = {0};
-		event.surface_descriptor = input->pointer_input_surface;
-		event.event_type = (state != 0)?
-			DWL_EVENT_TYPE_TOUCH_DOWN:DWL_EVENT_TYPE_TOUCH_UP;
-		event.params[0] = input->pointer_x;
-		event.params[1] = input->pointer_y;
-		dwl_context_push_event(context, &event);
-	}
+	/* every button; the touch mode (gvm_input.rs) still turns the left one into a touch */
+	gvm_push(context, input->pointer_input_surface, DWL_EVENT_TYPE_POINTER_BUTTON,
+		 (int32_t)button, state != 0, 0);
 }
 
 static void wl_pointer_frame(void *data, struct wl_pointer *wl_pointer)
@@ -442,11 +485,15 @@ static void wl_pointer_frame(void *data, struct wl_pointer *wl_pointer)
 static void pointer_axis_handler(void *data, struct wl_pointer *wl_pointer,
 				 uint32_t time, uint32_t axis, wl_fixed_t value)
 {
-	(void)data;
+	struct dwl_context *context = (struct dwl_context*)data;
+	struct input *input = &context->input;
 	(void)wl_pointer;
 	(void)time;
-	(void)axis;
-	(void)value;
+
+	if (!input->pointer_input_surface)
+		return;
+	/* params[1] = wl_fixed (value * 256); gvm_input.rs turns it into wheel notches */
+	gvm_push(context, input->pointer_input_surface, DWL_EVENT_TYPE_POINTER_AXIS, (int32_t)axis, value, 0);
 }
 
 static void wl_pointer_axis_source(void *data, struct wl_pointer *wl_pointer,
@@ -487,6 +534,81 @@ const struct wl_pointer_listener wl_pointer_listener = {
 	.axis_discrete = wl_pointer_axis_discrete,
 };
 
+/* iceland gvm: real multi-finger touch (KWin sends wl_touch to clients that bind it) */
+static void touch_down(void *data, struct wl_touch *wl_touch, uint32_t serial, uint32_t time,
+		       struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y)
+{
+	struct dwl_context *context = (struct dwl_context*)data;
+	(void)wl_touch;
+	(void)serial;
+	(void)time;
+	context->input.touch_surface = surface;
+	gvm_push(context, surface, DWL_EVENT_TYPE_FINGER_DOWN, id, gvm_to_buffer(surface, x),
+		 gvm_to_buffer(surface, y));
+}
+
+static void touch_up(void *data, struct wl_touch *wl_touch, uint32_t serial, uint32_t time, int32_t id)
+{
+	struct dwl_context *context = (struct dwl_context*)data;
+	(void)wl_touch;
+	(void)serial;
+	(void)time;
+	if (context->input.touch_surface)
+		gvm_push(context, context->input.touch_surface, DWL_EVENT_TYPE_FINGER_UP, id, 0, 0);
+}
+
+static void touch_motion(void *data, struct wl_touch *wl_touch, uint32_t time, int32_t id,
+			 wl_fixed_t x, wl_fixed_t y)
+{
+	struct dwl_context *context = (struct dwl_context*)data;
+	struct wl_surface *s = context->input.touch_surface;
+	(void)wl_touch;
+	(void)time;
+	if (s)
+		gvm_push(context, s, DWL_EVENT_TYPE_FINGER_MOTION, id, gvm_to_buffer(s, x), gvm_to_buffer(s, y));
+}
+
+static void touch_frame(void *data, struct wl_touch *wl_touch)
+{
+	(void)data;
+	(void)wl_touch;
+}
+
+static void touch_cancel(void *data, struct wl_touch *wl_touch)
+{
+	struct dwl_context *context = (struct dwl_context*)data;
+	(void)wl_touch;
+	if (context->input.touch_surface)
+		gvm_push(context, context->input.touch_surface, DWL_EVENT_TYPE_FINGER_CANCEL, 0, 0, 0);
+}
+
+static void touch_shape(void *data, struct wl_touch *wl_touch, int32_t id, wl_fixed_t major, wl_fixed_t minor)
+{
+	(void)data;
+	(void)wl_touch;
+	(void)id;
+	(void)major;
+	(void)minor;
+}
+
+static void touch_orientation(void *data, struct wl_touch *wl_touch, int32_t id, wl_fixed_t orientation)
+{
+	(void)data;
+	(void)wl_touch;
+	(void)id;
+	(void)orientation;
+}
+
+static const struct wl_touch_listener gvm_touch_listener = {
+	.down = touch_down,
+	.up = touch_up,
+	.motion = touch_motion,
+	.frame = touch_frame,
+	.cancel = touch_cancel,
+	.shape = touch_shape,
+	.orientation = touch_orientation,
+};
+
 static void wl_seat_capabilities(void *data, struct wl_seat *wl_seat,
 				 uint32_t capabilities)
 {
@@ -501,6 +623,15 @@ static void wl_seat_capabilities(void *data, struct wl_seat *wl_seat,
 	} else if (!have_keyboard && input->wl_keyboard != NULL) {
 		wl_keyboard_release(input->wl_keyboard);
 		input->wl_keyboard = NULL;
+	}
+
+	bool have_touch = capabilities & WL_SEAT_CAPABILITY_TOUCH;
+	if (have_touch && input->wl_touch == NULL) {
+		input->wl_touch = wl_seat_get_touch(wl_seat);
+		wl_touch_add_listener(input->wl_touch, &gvm_touch_listener, context);
+	} else if (!have_touch && input->wl_touch != NULL) {
+		wl_touch_release(input->wl_touch);
+		input->wl_touch = NULL;
 	}
 
 	if (have_pointer && input->wl_pointer == NULL) {
@@ -605,8 +736,9 @@ static void registry_global(void *data, struct wl_registry *registry,
 		    registry, id, &wl_seat_interface, 5);
 		wl_seat_add_listener(ifaces->seat, &wl_seat_listener, ifaces->context);
 	} else if (strcmp(interface, wl_output_interface.name) == 0) {
+		/* iceland gvm: v4 for the output name (CROSVM_GVM_OUTPUT) */
 		struct wl_output *output = (struct wl_output *)wl_registry_bind(
-		    registry, id, &wl_output_interface, 2);
+		    registry, id, &wl_output_interface, version < 4 ? (version < 2 ? version : 2) : 4);
 		dwl_context_output_add(ifaces->context, output, id);
 	} else if (strcmp(interface, "zaura_shell") == 0 && version >= 6) {
 		ifaces->aura = (struct zaura_shell *)wl_registry_bind(
@@ -1129,6 +1261,30 @@ struct dwl_surface *dwl_context_surface_new(struct dwl_context *self,
 		xdg_surface_add_listener(disp_surface->xdg_surface,
 					     &xdg_surface_listener,
 					     NULL);
+		/* iceland gvm (0.2-6): CROSVM_GVM_FULLSCREEN=1 opens the window fullscreen, on the output named
+		 * or numbered (0-based, binding order) by CROSVM_GVM_OUTPUT; unknown or unset = the compositor's choice */
+		const char *fs = getenv("CROSVM_GVM_FULLSCREEN");
+		if (fs && *fs && strcmp(fs, "0") != 0) {
+			const char *want = getenv("CROSVM_GVM_OUTPUT");
+			struct wl_output *target = NULL;
+			if (want && *want) {
+				char *end = NULL;
+				long n = strtol(want, &end, 10);
+				size_t oi, k = 0;
+				struct output *o;
+				outputs_for_each(self, oi, o)
+				{
+					if (!o->output)
+						continue;
+					if ((end && *end == 0 && (long)k == n) || strcmp(o->name, want) == 0) {
+						target = o->output;
+						break;
+					}
+					k++;
+				}
+			}
+			xdg_toplevel_set_fullscreen(disp_surface->xdg_toplevel, target);
+		}
 		if (self->ifaces.aura) {
 			disp_surface->aura = zaura_shell_get_aura_surface(
 			    self->ifaces.aura, disp_surface->wl_surface);

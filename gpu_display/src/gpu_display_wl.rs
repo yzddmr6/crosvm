@@ -203,6 +203,70 @@ pub struct DisplayWl {
     ctx: DwlContext,
     current_event: Option<dwl_event>,
     mt_tracking_id: u16,
+    // iceland gvm: the window's input mode (CROSVM_GVM_INPUT_MODE) and the last pointer position
+    gvm_input: crate::gvm_input::Mapper,
+    gvm_pointer: (i32, i32),
+    gvm_t0: std::time::Instant,
+}
+
+/// iceland gvm: turns the mode mapper's output into one report for one guest device.
+fn gvm_report(outs: Vec<crate::gvm_input::Out>) -> Option<GpuDisplayEvents> {
+    use crate::gvm_input::Out;
+    const REL_HWHEEL: u16 = 0x06;
+    if outs.is_empty() {
+        return None;
+    }
+    let device_type = match outs[0] {
+        Out::MtDown { .. } | Out::MtMove { .. } | Out::MtUp { .. } => EventDeviceKind::Touchscreen,
+        Out::RelMove { .. } | Out::RelButton { .. } | Out::RelWheel { .. } | Out::RelSyn => EventDeviceKind::Mouse,
+        _ => EventDeviceKind::Tablet,
+    };
+    let mut events = Vec::new();
+    for o in outs {
+        match o {
+            Out::MtDown { slot, id, x, y } => events.extend([
+                virtio_input_event::multitouch_slot(slot),
+                virtio_input_event::multitouch_tracking_id(id),
+                virtio_input_event::multitouch_absolute_x(max(0, x)),
+                virtio_input_event::multitouch_absolute_y(max(0, y)),
+                virtio_input_event::touch(true),
+            ]),
+            Out::MtMove { slot, x, y } => events.extend([
+                virtio_input_event::multitouch_slot(slot),
+                virtio_input_event::multitouch_absolute_x(max(0, x)),
+                virtio_input_event::multitouch_absolute_y(max(0, y)),
+            ]),
+            Out::MtUp { slot, last } => {
+                events.push(virtio_input_event::multitouch_slot(slot));
+                events.push(virtio_input_event::multitouch_tracking_id(-1));
+                if last {
+                    events.push(virtio_input_event::touch(false));
+                }
+            }
+            Out::AbsMove { x, y } => {
+                events.push(virtio_input_event::absolute_x(max(0, x)));
+                events.push(virtio_input_event::absolute_y(max(0, y)));
+            }
+            Out::AbsButton { code, down } | Out::RelButton { code, down } => {
+                events.push(virtio_input_event::key(code, down, false))
+            }
+            Out::AbsWheel { v, h } => {
+                if v != 0 {
+                    events.push(virtio_input_event::wheel(v));
+                }
+                if h != 0 {
+                    events.push(virtio_input_event::relative(REL_HWHEEL, h));
+                }
+            }
+            Out::RelWheel { v } => events.push(virtio_input_event::wheel(v)),
+            Out::RelMove { dx, dy } => {
+                events.push(virtio_input_event::relative_x(dx));
+                events.push(virtio_input_event::relative_y(dy));
+            }
+            Out::AbsSyn | Out::RelSyn => events.push(virtio_input_event::syn()),
+        }
+    }
+    Some(GpuDisplayEvents { events, device_type })
 }
 
 /// Error logging callback used by wrapped C implementation.
@@ -260,11 +324,18 @@ impl DisplayWl {
             return Err(GpuDisplayError::Connect);
         }
 
+        let mode = crate::gvm_input::Mode::from_env();
+        if mode != crate::gvm_input::Mode::Touch {
+            base::warn!("GVM-INPUT mode {:?} (CROSVM_GVM_INPUT_MODE)", mode);
+        }
         Ok(DisplayWl {
             dmabufs: HashMap::new(),
             ctx,
             current_event: None,
             mt_tracking_id: 0u16,
+            gvm_input: crate::gvm_input::Mapper::new(mode),
+            gvm_pointer: (0, 0),
+            gvm_t0: std::time::Instant::now(),
         })
     }
 
@@ -326,9 +397,33 @@ impl DisplayT for DisplayWl {
                     device_type: EventDeviceKind::Keyboard,
                 })
             }
-            // TODO(tutankhamen): slot is always 0, because all the input
-            // events come from mouse device, i.e. only one touch is possible at a time.
-            // Full MT protocol has to be implemented and properly wired later.
+            // iceland gvm (0.2-6): display_wl.c sends the raw pointer and real fingers; the input mode
+            // (gvm_input.rs) decides what reaches which guest device (touch screen, tablet, mouse)
+            DWL_EVENT_TYPE_POINTER_MOVE => {
+                self.gvm_pointer = (event.params[0], event.params[1]);
+                gvm_report(self.gvm_input.pointer_move(event.params[0], event.params[1]))
+            }
+            DWL_EVENT_TYPE_POINTER_BUTTON => {
+                let (x, y) = self.gvm_pointer;
+                gvm_report(self.gvm_input.pointer_button(event.params[0] as u16, event.params[1] != 0, x, y))
+            }
+            DWL_EVENT_TYPE_POINTER_AXIS => {
+                gvm_report(self.gvm_input.pointer_axis(event.params[0] as u32, event.params[1] as f64 / 256.0))
+            }
+            DWL_EVENT_TYPE_FINGER_DOWN => {
+                let now = self.gvm_t0.elapsed().as_millis() as u64;
+                gvm_report(self.gvm_input.finger_down(event.params[0], event.params[1], event.params[2], now))
+            }
+            DWL_EVENT_TYPE_FINGER_MOTION => {
+                let now = self.gvm_t0.elapsed().as_millis() as u64;
+                gvm_report(self.gvm_input.finger_motion(event.params[0], event.params[1], event.params[2], now))
+            }
+            DWL_EVENT_TYPE_FINGER_UP => {
+                let now = self.gvm_t0.elapsed().as_millis() as u64;
+                gvm_report(self.gvm_input.finger_up(event.params[0], now))
+            }
+            DWL_EVENT_TYPE_FINGER_CANCEL => gvm_report(self.gvm_input.finger_cancel()),
+            // upstream single-touch emulation (no longer sent by display_wl.c, kept for other senders)
             DWL_EVENT_TYPE_TOUCH_DOWN | DWL_EVENT_TYPE_TOUCH_MOTION => {
                 let tracking_id = if event.event_type == DWL_EVENT_TYPE_TOUCH_DOWN {
                     self.next_tracking_id()

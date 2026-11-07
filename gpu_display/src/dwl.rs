@@ -79,6 +79,12 @@ pub const DWL_EVENT_TYPE_POINTER_BUTTON: u32 = 0x13;
 pub const DWL_EVENT_TYPE_TOUCH_DOWN: u32 = 0x20;
 pub const DWL_EVENT_TYPE_TOUCH_UP: u32 = 0x21;
 pub const DWL_EVENT_TYPE_TOUCH_MOTION: u32 = 0x22;
+// iceland gvm (input modes): raw pointer and multi-finger touch from display_wl.c
+pub const DWL_EVENT_TYPE_POINTER_AXIS: u32 = 0x14;
+pub const DWL_EVENT_TYPE_FINGER_DOWN: u32 = 0x30;
+pub const DWL_EVENT_TYPE_FINGER_UP: u32 = 0x31;
+pub const DWL_EVENT_TYPE_FINGER_MOTION: u32 = 0x32;
+pub const DWL_EVENT_TYPE_FINGER_CANCEL: u32 = 0x33;
 
 pub const DWL_SURFACE_FLAG_RECEIVE_INPUT: u32 = 1 << 0;
 pub const DWL_SURFACE_FLAG_HAS_ALPHA: u32 = 1 << 1;

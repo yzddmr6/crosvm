@@ -220,6 +220,59 @@ static GUNYAH_PATH: &str = "/dev/gunyah";
 #[cfg(feature = "halla")]
 const HALLA_PATH: &str = "/dev/halla";
 
+/// iceland gvm (iceland-vms 0.2-6): the window's tablet / touchpad input modes (CROSVM_GVM_INPUT_MODE) need an
+/// absolute pointer (tablet: ABS_X/Y, buttons, wheel) and a relative mouse next to the touch screen. Added only
+/// in those modes, so the guest's device set is unchanged in the default touch mode.
+#[cfg(feature = "gpu")]
+fn gvm_pointer_devices(
+    cfg: &Config,
+    devs: &mut Vec<(&'static str, VirtioDeviceStub)>,
+    event_devices: &mut Vec<EventDevice>,
+    width: u32,
+    height: u32,
+    idx: u32,
+    which: &'static str,
+) -> DeviceResult<()> {
+    let mode = std::env::var("CROSVM_GVM_INPUT_MODE").unwrap_or_default();
+    if mode != "tablet" && mode != "touchpad" {
+        return Ok(());
+    }
+    let (event_socket, virtio_socket) =
+        StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte).context("failed to create socket")?;
+    let dev = virtio::input::new_tablet(
+        idx,
+        virtio_socket,
+        width,
+        height,
+        Some(if which == "simplefb" { "gvm simplefb tablet" } else { "gvm window tablet" }),
+        virtio::base_features(cfg.protection_type),
+    )
+    .context("failed to set up the gvm tablet device")?;
+    devs.push((
+        if which == "simplefb" { "simplefb_tablet" } else { "window_tablet" },
+        VirtioDeviceStub {
+            dev: Box::new(dev),
+            jail: simple_jail(cfg.jail_config.as_ref(), "input_device")?,
+        },
+    ));
+    event_devices.push(EventDevice::tablet(event_socket));
+
+    let (event_socket, virtio_socket) =
+        StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte).context("failed to create socket")?;
+    let dev = virtio::input::new_mouse(idx - 1, virtio_socket, virtio::base_features(cfg.protection_type))
+        .context("failed to set up the gvm mouse device")?;
+    devs.push((
+        if which == "simplefb" { "simplefb_mouse" } else { "window_mouse" },
+        VirtioDeviceStub {
+            dev: Box::new(dev),
+            jail: simple_jail(cfg.jail_config.as_ref(), "input_device")?,
+        },
+    ));
+    event_devices.push(EventDevice::mouse(event_socket));
+    warn!("GVM-INPUT {which}: tablet + mouse devices for mode {mode}");
+    Ok(())
+}
+
 fn create_virtio_devices(
     cfg: &Config,
     vm: &dyn VmArch,
@@ -358,6 +411,15 @@ fn create_virtio_devices(
                     },
                 ));
                 event_devices.push(EventDevice::touchscreen(event_device_socket));
+                gvm_pointer_devices(
+                    cfg,
+                    &mut devs,
+                    &mut event_devices,
+                    multi_touch_width,
+                    multi_touch_height,
+                    u32::MAX - 4,
+                    "window",
+                )?;
             }
             if cfg.display_window_keyboard {
                 let (event_device_socket, virtio_dev_socket) =
@@ -425,6 +487,15 @@ fn create_virtio_devices(
             },
         ));
         simplefb_event_devices.push(EventDevice::touchscreen(event_device_socket));
+        gvm_pointer_devices(
+            cfg,
+            &mut devs,
+            simplefb_event_devices,
+            sfb.width,
+            sfb.height,
+            u32::MAX - 6,
+            "simplefb",
+        )?;
 
         let (event_device_socket, virtio_dev_socket) =
             StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte)

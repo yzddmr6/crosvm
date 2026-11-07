@@ -797,6 +797,25 @@ where
     ))
 }
 
+/// iceland gvm: a new virtio absolute pointer (tablet) for the display window's input modes.
+pub fn new_tablet<T>(
+    idx: u32,
+    source: T,
+    width: u32,
+    height: u32,
+    name: Option<&str>,
+    virtio_features: u64,
+) -> Result<Input<SocketEventSource<T>>>
+where
+    T: Read + Write + AsRawDescriptor + Send + 'static,
+{
+    Ok(Input::new(
+        defaults::new_tablet_config(idx, width, height, name),
+        Some(SocketEventSource::new(source)),
+        virtio_features,
+    ))
+}
+
 /// Creates a new virtio mouse which supports primary, secondary, wheel and REL events.
 pub fn new_mouse<T>(
     idx: u32,

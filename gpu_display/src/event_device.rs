@@ -31,6 +31,8 @@ pub enum EventDeviceKind {
     Touchscreen,
     /// Produces key events while the display window has focus.
     Keyboard,
+    /// iceland gvm: absolute pointer (ABS_X/Y, buttons, wheel) of the window's tablet / touchpad modes.
+    Tablet,
 }
 
 /// Encapsulates a virtual event device, such as a mouse or keyboard
@@ -64,6 +66,11 @@ impl EventDevice {
     #[inline]
     pub fn keyboard(event_socket: StreamChannel) -> EventDevice {
         Self::new(EventDeviceKind::Keyboard, event_socket)
+    }
+
+    #[inline]
+    pub fn tablet(event_socket: StreamChannel) -> EventDevice {
+        Self::new(EventDeviceKind::Tablet, event_socket)
     }
 
     #[inline]
