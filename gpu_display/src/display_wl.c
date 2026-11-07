@@ -555,6 +555,17 @@ static void touch_down(void *data, struct wl_touch *wl_touch, uint32_t serial, u
 	context->input.touch_surface = surface;
 	gvm_push(context, surface, DWL_EVENT_TYPE_FINGER_DOWN, id, gvm_to_buffer_x(surface, x),
 		 gvm_to_buffer_y(surface, y));
+	/* iceland gvm (p1 VIN): CROSVM_GVM_INPUT_LOG=1 logs the first 400 finger downs (surface -> buffer) */
+	{
+		static int n;
+		const char *lg = getenv("CROSVM_GVM_INPUT_LOG");
+		if (lg && *lg == '1' && n++ < 400) {
+			fprintf(stderr, "GVM-TOUCH down id=%d surface=%.1f,%.1f buffer=%d,%d\n", id,
+				wl_fixed_to_double(x), wl_fixed_to_double(y), gvm_to_buffer_x(surface, x),
+				gvm_to_buffer_y(surface, y));
+			fflush(stderr);
+		}
+	}
 }
 
 static void touch_up(void *data, struct wl_touch *wl_touch, uint32_t serial, uint32_t time, int32_t id)
@@ -817,6 +828,10 @@ static void toplevel_configure(void *data,
 		if (*st == XDG_TOPLEVEL_STATE_FULLSCREEN)
 			fullscreen = true;
 	}
+	/* iceland gvm (p1 VIN): every configure, for the fullscreen settle analysis */
+	fprintf(stderr, "GVM-CONFIGURE %dx%d fullscreen=%d viewport=%d\n", width, height, fullscreen,
+		surface && surface->viewport ? 1 : 0);
+	fflush(stderr);
 	if (!surface || !surface->viewport)
 		return;
 	if (fullscreen && width > 0 && height > 0) {
