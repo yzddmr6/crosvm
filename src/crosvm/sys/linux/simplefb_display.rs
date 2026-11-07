@@ -53,6 +53,9 @@ pub struct SimplefbParams {
     pub poll_hz: u32,
     /// `--wayland-sock` (the unnamed one), else $WAYLAND_DISPLAY.
     pub wayland_socket: Option<PathBuf>,
+    /// iceland gvm: `--vnc-server` (host, port, password): serve the framebuffer over VNC instead
+    /// of a window.
+    pub vnc: Option<(String, u16, Option<String>)>,
 }
 
 /// Logs the GVM-SIMPLEFB line and starts the bridge thread. The thread lives until the
@@ -202,8 +205,14 @@ fn bridge(
     event_devices: Vec<EventDevice>,
     vm_evt_wrtube: &SendTube,
 ) -> Result<()> {
-    let mut display = GpuDisplay::open_wayland(params.wayland_socket.as_ref())
-        .context("simplefb: failed to open the Wayland display")?;
+    let mut display = match &params.vnc {
+        Some((host, port, password)) => {
+            GpuDisplay::open_vnc(host, *port, params.width, params.height, password.as_deref())
+                .context("simplefb: failed to start the VNC server")?
+        }
+        None => GpuDisplay::open_wayland(params.wayland_socket.as_ref())
+            .context("simplefb: failed to open the Wayland display")?,
+    };
     for dev in event_devices {
         display
             .import_event_device(dev)

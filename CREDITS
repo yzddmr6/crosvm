@@ -11,3 +11,11 @@ Upstream crosvm files stay under their BSD-3-Clause license (LICENSE).
   each read. Ported in reduced form into aarch64/src/simplefb.rs and
   src/crosvm/sys/linux/simplefb_display.rs, which keep DroidVM's SPDX / copyright header.
   Nothing was taken from the DroidVM app or DroidVM-Daemon repositories.
+- DroidVM dvm-crosvm 849e05f, same licence: the VNC display ("--vnc-server", iceland-vms 0.2-7) --
+  gpu_display/src/vnc_server_bridge.c, vnc_server_bridge.h and vnc_frame_consumer.h (the LibVNCServer
+  bridge: listeners, keysym map, input ring, banded damage tracking, cursor compositing) ported without
+  the H.264 path; gpu_display/src/gpu_display_vnc.rs reduced to the CPU transport (no Vulkan blit, no
+  H.264 consumer, no dmabuf imports, input through the display's event devices). All keep DroidVM's
+  header. Links the system LibVNCServer (GPL-2.0-or-later). The option wiring (src/crosvm/config.rs
+  VncConfig, cmdline.rs, sys/linux/gpu.rs, simplefb_display.rs, devices DisplayBackend::Vnc) is our own,
+  modelled on DroidVM's.

@@ -146,6 +146,27 @@ pub fn create_gpu_device(
         );
     }
 
+    // iceland gvm: --vnc-server replaces every window backend with the headless VNC server (a VNC
+    // display that cannot start falls back to the stub, the VM keeps running)
+    #[cfg(feature = "vnc")]
+    if let Some(v) = &cfg.vnc_server {
+        let (width, height) = gpu_params
+            .display_params
+            .first()
+            .map(|d| d.get_virtual_display_size())
+            .unwrap_or((1280, 1024));
+        display_backends = vec![
+            virtio::DisplayBackend::Vnc {
+                host: v.host.clone(),
+                port: v.port,
+                password: v.password().map_err(|e| anyhow::anyhow!(e))?,
+                width,
+                height,
+            },
+            virtio::DisplayBackend::Stub,
+        ];
+    }
+
     let dev = virtio::Gpu::new(
         exit_evt_wrtube
             .try_clone()

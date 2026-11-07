@@ -111,6 +111,7 @@ use crate::crosvm::config::SimplefbConfig;
 #[cfg(target_arch = "aarch64")]
 use crate::crosvm::config::ToggleMode;
 use crate::crosvm::config::TouchDeviceOption;
+use crate::crosvm::config::VncConfig;
 use crate::crosvm::config::VhostUserFrontendOption;
 
 #[derive(FromArgs)]
@@ -2296,6 +2297,17 @@ pub struct RunCommand {
     ///         per device.
     pub virtio_snd: Vec<SndParameters>,
 
+    #[argh(option, arg_name = "[host=ADDR][,port=N][,password-file=PATH]")]
+    /// iceland gvm: serve the display (virtio-gpu scanout or
+    /// --simplefb) over VNC instead of a window; pointer and keys
+    /// reach the guest as an absolute tablet and a keyboard.
+    /// Possible key values:
+    ///     host=ADDR - listen address literal (default 127.0.0.1;
+    ///     0.0.0.0 = every address)
+    ///     port=N - TCP port (default 5900)
+    ///     password-file=PATH - VNC password (first line)
+    pub vnc_server: Option<VncConfig>,
+
     #[argh(option, arg_name = "cid=CID[,device=VHOST_DEVICE]")]
     /// add a vsock device. Since a guest can only have one CID,
     /// this option can only be specified once.
@@ -2765,6 +2777,7 @@ impl TryFrom<RunCommand> for super::config::Config {
 
         cfg.display_window_keyboard = cmd.display_window_keyboard.unwrap_or_default();
         cfg.display_window_mouse = cmd.display_window_mouse.unwrap_or_default();
+        cfg.vnc_server = cmd.vnc_server; // iceland gvm
 
         cfg.swap_dir = cmd.swap_dir;
         cfg.restore_path = cmd.restore;

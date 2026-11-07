@@ -16,6 +16,8 @@ android_display = []
 # Android display backend on a non-Android target
 android_display_stub = []
 gfxstream_display = []
+# iceland gvm: headless RFB (VNC) display backend over LibVNCServer, after DroidVM (GPL-2.0-or-later files)
+vnc = []
 
 [dependencies]
 anyhow = { workspace = true }

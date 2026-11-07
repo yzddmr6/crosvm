@@ -1430,6 +1430,15 @@ pub enum DisplayBackend {
     /// using the name given here. The entity holding the surface is expected to locate the service
     /// via this name, and pass the surface to it.
     Android(String),
+    #[cfg(feature = "vnc")]
+    /// iceland gvm: a headless VNC (RFB) server instead of a window (`--vnc-server`).
+    Vnc {
+        host: String,
+        port: u16,
+        password: Option<String>,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl DisplayBackend {
@@ -1459,6 +1468,14 @@ impl DisplayBackend {
             },
             #[cfg(feature = "android_display")]
             DisplayBackend::Android(service_name) => GpuDisplay::open_android(service_name),
+            #[cfg(feature = "vnc")]
+            DisplayBackend::Vnc {
+                host,
+                port,
+                password,
+                width,
+                height,
+            } => GpuDisplay::open_vnc(host, *port, *width, *height, password.as_deref()),
         }
     }
 }

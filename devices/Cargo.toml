@@ -15,6 +15,8 @@ audio = []
 audio_cras = ["libcras"]
 balloon = []
 gpu = ["gpu_display", "rutabaga_gfx"]
+# iceland gvm: the VNC display backend (DisplayBackend::Vnc)
+vnc = ["gpu", "gpu_display/vnc"]
 gunyah = []
 libvda-stub = ["libvda/libvda-stub"]
 net = []

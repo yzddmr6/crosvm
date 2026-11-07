@@ -103,6 +103,26 @@ fn build_wayland() {
     println!("cargo:rustc-link-lib=dylib=wayland-client");
 }
 
+/// iceland gvm: the VNC sink's LibVNCServer bridge (ported from DroidVM, GPL-2.0-or-later), linked
+/// against the system libvncserver (Fedora libvncserver-devel).
+fn build_vnc() {
+    let lib = pkg_config::Config::new()
+        .probe("libvncserver")
+        .expect("the vnc feature needs libvncserver (pkg-config libvncserver; Fedora: libvncserver-devel)");
+    let mut build = cc::Build::new();
+    build.warnings(true);
+    build.flag("-std=gnu11");
+    for inc in &lib.include_paths {
+        build.include(inc);
+    }
+    build.file("src/vnc_server_bridge.c");
+    println!("cargo:rerun-if-changed=src/vnc_server_bridge.c");
+    println!("cargo:rerun-if-changed=src/vnc_server_bridge.h");
+    println!("cargo:rerun-if-changed=src/vnc_frame_consumer.h");
+    build.compile("vnc_server_bridge");
+    // pkg-config already printed the link lines of libvncserver for the crate
+}
+
 fn main() {
     // Skip installing dependencies when generating documents.
     if std::env::var("CARGO_DOC").is_ok() {
@@ -112,6 +132,9 @@ fn main() {
     match std::env::var("CARGO_CFG_TARGET_OS").as_deref().unwrap() {
         "linux" | "android" => {
             build_wayland();
+            if std::env::var("CARGO_FEATURE_VNC").is_ok() {
+                build_vnc();
+            }
         }
         _ => {}
     }

@@ -40,6 +40,8 @@ mod gpu_display_win;
 mod gpu_display_wl;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub mod gvm_input;
+#[cfg(all(feature = "vnc", any(target_os = "linux", target_os = "android")))]
+mod gpu_display_vnc;
 #[cfg(feature = "x")]
 mod gpu_display_x;
 #[cfg(any(windows, feature = "x"))]
@@ -476,6 +478,33 @@ impl GpuDisplay {
             })
         }
         #[cfg(not(feature = "android_display"))]
+        Err(GpuDisplayError::Unsupported)
+    }
+
+    /// iceland gvm: a headless VNC (RFB) server instead of a window; `host` is an address literal
+    /// ("" = every address), see gpu_display_vnc.rs.
+    pub fn open_vnc(
+        host: &str,
+        port: u16,
+        width: u32,
+        height: u32,
+        password: Option<&str>,
+    ) -> GpuDisplayResult<GpuDisplay> {
+        let _ = (host, port, width, height, password);
+        #[cfg(all(feature = "vnc", any(target_os = "linux", target_os = "android")))]
+        {
+            let display = gpu_display_vnc::DisplayVnc::new_tcp(host, port, width, height, password)?;
+            let wait_ctx = WaitContext::new()?;
+            wait_ctx.add(&display, DisplayEventToken::Display)?;
+            Ok(GpuDisplay {
+                inner: Box::new(display),
+                next_id: 1,
+                event_devices: Default::default(),
+                surfaces: Default::default(),
+                wait_ctx,
+            })
+        }
+        #[cfg(not(all(feature = "vnc", any(target_os = "linux", target_os = "android"))))]
         Err(GpuDisplayError::Unsupported)
     }
 

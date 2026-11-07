@@ -233,8 +233,11 @@ fn gvm_pointer_devices(
     idx: u32,
     which: &'static str,
 ) -> DeviceResult<()> {
-    let mode = std::env::var("CROSVM_GVM_INPUT_MODE").unwrap_or_default();
-    if mode != "tablet" && mode != "touchpad" {
+    let mut mode = std::env::var("CROSVM_GVM_INPUT_MODE").unwrap_or_default();
+    if cfg.vnc_server.is_some() {
+        // iceland gvm: the VNC sink drives the guest with an absolute pointer (RFB pointer events)
+        mode = "vnc".to_string();
+    } else if mode != "tablet" && mode != "touchpad" {
         return Ok(());
     }
     let (event_socket, virtio_socket) =
@@ -2636,6 +2639,14 @@ fn run_vm(
             format: sfb.format.clone(),
             poll_hz: sfb.poll_hz,
             wayland_socket: cfg.wayland_socket_paths.get("").cloned(),
+            vnc: match &cfg.vnc_server {
+                Some(v) => Some((
+                    v.host.clone(),
+                    v.port,
+                    v.password().map_err(|e| anyhow::anyhow!(e))?,
+                )),
+                None => None,
+            },
         };
         simplefb_display::start(
             linux.vm.get_memory().clone(),

@@ -448,6 +448,58 @@ fn validate_simplefb(sfb: &SimplefbConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// iceland gvm: `--vnc-server [host=ADDR][,port=N][,password-file=PATH]`: serve the display (the
+/// virtio-gpu scanout or the --simplefb framebuffer) over VNC instead of a window. After DroidVM's
+/// `VncConfig` (dvm-crosvm 849e05f), reduced to one server. host defaults to 127.0.0.1 (DroidVM: every
+/// address): a LAN listener has to be asked for. The password is read from a file so it never shows in
+/// the process list (RFB "VNC authentication": 8 characters, DES; only for a LAN behind a firewall).
+#[derive(Clone, Debug, Serialize, Deserialize, FromKeyValues, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct VncConfig {
+    #[serde(default = "default_vnc_host")]
+    pub host: String,
+    #[serde(default = "default_vnc_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub password_file: Option<PathBuf>,
+}
+
+fn default_vnc_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_vnc_port() -> u16 {
+    5900
+}
+
+impl VncConfig {
+    /// The password (first line of password-file), None without one.
+    pub fn password(&self) -> Result<Option<String>, String> {
+        match &self.password_file {
+            None => Ok(None),
+            Some(p) => {
+                let s = std::fs::read_to_string(p)
+                    .map_err(|e| format!("`vnc-server` password-file {}: {}", p.display(), e))?;
+                let line = s.lines().next().unwrap_or("").trim().to_string();
+                Ok(if line.is_empty() { None } else { Some(line) })
+            }
+        }
+    }
+}
+
+fn validate_vnc(v: &VncConfig) -> Result<(), String> {
+    if !cfg!(feature = "vnc") {
+        return Err("`vnc-server` needs a crosvm built with the vnc feature".to_string());
+    }
+    if v.host.parse::<std::net::IpAddr>().is_err() && !v.host.is_empty() {
+        return Err(format!("`vnc-server` host {} is not an IP address literal", v.host));
+    }
+    if v.port < 1024 {
+        return Err("`vnc-server` port must be 1024..65535".to_string());
+    }
+    v.password().map(|_| ())
+}
+
 #[derive(Debug, Serialize, Deserialize, FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct BatteryConfig {
@@ -807,6 +859,7 @@ pub struct Config {
     #[serde(default)]
     pub virtio_device_modules: Vec<AnyVirtioDeviceModule>,
     pub virtio_input: Vec<InputDeviceOption>,
+    pub vnc_server: Option<VncConfig>,
     pub wayland_socket_paths: BTreeMap<String, PathBuf>,
     #[cfg(all(windows, feature = "gpu"))]
     pub window_procedure_thread_split_config: Option<WindowProcedureThreadSplitConfig>,
@@ -977,6 +1030,7 @@ impl Default for Config {
             #[cfg(feature = "media")]
             simple_media_device: Default::default(),
             simplefb: None,
+            vnc_server: None,
             #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             slirp_capture_file: None,
             #[cfg(target_arch = "x86_64")]
@@ -1052,6 +1106,9 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
     }
     if let Some(sfb) = &cfg.simplefb {
         validate_simplefb(sfb)?;
+    }
+    if let Some(v) = &cfg.vnc_server {
+        validate_vnc(v)?;
     }
     #[cfg(feature = "gdb")]
     if cfg.gdb.is_some() && cfg.vcpu_count.unwrap_or(1) != 1 {
