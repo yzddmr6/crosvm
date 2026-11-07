@@ -6,6 +6,7 @@
 mod aarch64;
 
 mod gunyah_sys;
+pub mod gvm_accept;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
@@ -23,6 +24,7 @@ use base::errno_result;
 use base::error;
 use base::info;
 use base::ioctl;
+use base::ioctl_with_mut_ref;
 use base::ioctl_with_ref;
 use base::ioctl_with_val;
 use base::pagesize;
@@ -221,6 +223,21 @@ pub struct GunyahVm {
     mem_slot_gaps: Mutex<BinaryHeap<Reverse<MemSlot>>>,
     routes: Mutex<HashSet<GunyahIrqRoute>>,
     hv_cfg: crate::Config,
+    /// Guest RAM is lent (protected VM): runtime mappings must be shared and guest-accepted.
+    protected: bool,
+    /// GH_VM_START succeeded: from here on add_memory_region is a runtime attach.
+    started: std::sync::atomic::AtomicBool,
+    /// Runtime GuestAccept shares by slot (iceland gvm).
+    runtime_shares: Mutex<BTreeMap<MemSlot, RuntimeShare>>,
+    /// Descriptor + offset of the region the next add_memory_region maps (set by vm_control).
+    source_hint: Mutex<Option<(RawDescriptor, u64)>>,
+}
+
+/// A region shared at runtime with a protected guest and accepted by it.
+struct RuntimeShare {
+    region: Box<dyn MappedRegion>,
+    guest_addr: GuestAddress,
+    label: u32,
 }
 
 impl AsRawDescriptor for GunyahVm {
@@ -322,7 +339,11 @@ impl GunyahVm {
             mem_regions: Default::default(),
             mem_slot_gaps: Default::default(),
             routes: Default::default(),
+            protected: cfg.protection_type.isolates_memory(),
             hv_cfg: cfg,
+            started: std::sync::atomic::AtomicBool::new(false),
+            runtime_shares: Default::default(),
+            source_hint: Mutex::new(None),
         })
     }
 
@@ -524,10 +545,102 @@ impl GunyahVm {
         // SAFETY: safe because memory is not modified and the return value is checked.
         let ret = unsafe { ioctl(self, GH_VM_START) };
         if ret == 0 {
+            self.started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         } else {
             errno_result()
         }
+    }
+
+    /// iceland gvm: share a runtime mapping with the protected guest and have it accepted.
+    fn runtime_share(
+        &self,
+        slot: MemSlot,
+        guest_addr: GuestAddress,
+        size: u64,
+        read_only: bool,
+        mem_region: &dyn MappedRegion,
+    ) -> Result<u32> {
+        let label = 0x4000_0000 | slot;
+        let mut flags = GUNYAH_MEM_ALLOW_READ;
+        if !read_only {
+            flags |= GUNYAH_MEM_ALLOW_WRITE;
+        }
+        let hint = self.source_hint.lock().take();
+        let mut handle = None;
+        if let Some((fd, offset)) = hint {
+            let mut a = gunyah_protected_share_dmabuf {
+                label,
+                flags,
+                guest_phys_addr: guest_addr.offset(),
+                memory_size: size,
+                dmabuf_offset: offset,
+                dmabuf_fd: fd,
+                mem_handle: 0,
+            };
+            // SAFETY: the VM fd is valid, `a` is a valid in/out argument, the result is checked.
+            let ret = unsafe { ioctl_with_mut_ref(self, GH_VM_PROTECTED_SHARE_DMABUF, &mut a) };
+            if ret == 0 {
+                handle = Some(a.mem_handle);
+            } else {
+                info!(
+                    "gvm-accept: dma-buf share of {:#x} failed ({}), trying the mapping",
+                    guest_addr.offset(),
+                    Error::last()
+                );
+            }
+        }
+        let handle = match handle {
+            Some(h) => h,
+            None => {
+                let mut a = gunyah_protected_share {
+                    label,
+                    flags,
+                    guest_phys_addr: guest_addr.offset(),
+                    memory_size: size,
+                    userspace_addr: mem_region.as_ptr() as u64,
+                    mem_handle: 0,
+                    reserved: 0,
+                };
+                // SAFETY: as above; the kernel pins the pages of this live mapping.
+                let ret = unsafe { ioctl_with_mut_ref(self, GH_VM_PROTECTED_SHARE, &mut a) };
+                if ret != 0 {
+                    let e = Error::last();
+                    error!("gvm-accept: share of {:#x} (+{:#x}) failed: {}", guest_addr.offset(), size, e);
+                    return Err(e);
+                }
+                a.mem_handle
+            }
+        };
+        if let Err(e) = gvm_accept::drive(
+            gvm_accept::GvmAcceptOp::Accept,
+            handle,
+            guest_addr.offset(),
+            size,
+        ) {
+            let _ = self.protected_unshare(label);
+            return Err(e);
+        }
+        Ok(label)
+    }
+
+    /// iceland gvm: reclaim a runtime share; the RM answers EBUSY until the guest has released it.
+    fn protected_unshare(&self, label: u32) -> Result<()> {
+        let a = gunyah_protected_unshare { label, reserved: 0 };
+        for _ in 0..200 {
+            // SAFETY: the VM fd is valid and `a` a valid argument; the result is checked.
+            let ret = unsafe { ioctl_with_ref(self, GH_VM_PROTECTED_UNSHARE, &a) };
+            if ret == 0 {
+                return Ok(());
+            }
+            let e = Error::last();
+            if e.errno() != libc::EBUSY {
+                return Err(e);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Err(Error::new(libc::EBUSY))
     }
 
     fn handle_inflate(&self, guest_addr: GuestAddress, size: u64) -> Result<()> {
@@ -614,8 +727,35 @@ impl Vm for GunyahVm {
         let mut gaps = self.mem_slot_gaps.lock();
         let slot = match gaps.pop() {
             Some(gap) => gap.0,
-            None => (regions.len() + self.guest_mem.num_regions() as usize) as MemSlot,
+            None => {
+                (regions.len()
+                    + self.runtime_shares.lock().len()
+                    + self.guest_mem.num_regions() as usize) as MemSlot
+            }
         };
+
+        if self.protected && self.started.load(std::sync::atomic::Ordering::SeqCst) {
+            // A protected guest owns its stage-2: share + guest accept (iceland gvm).
+            return match self.runtime_share(slot, guest_addr, size, read_only, mem_region.as_ref())
+            {
+                Ok(label) => {
+                    self.runtime_shares.lock().insert(
+                        slot,
+                        RuntimeShare {
+                            region: mem_region,
+                            guest_addr,
+                            label,
+                        },
+                    );
+                    Ok(slot)
+                }
+                Err(e) => {
+                    gaps.push(Reverse(slot));
+                    Err(e)
+                }
+            };
+        }
+        self.source_hint.lock().take();
 
         // SAFETY: safe because memory is not modified and the return value is checked.
         let res = unsafe {
@@ -667,8 +807,30 @@ impl Vm for GunyahVm {
         Err(Error::new(ENOTSUP))
     }
 
-    fn remove_memory_region(&self, _slot: MemSlot) -> Result<Box<dyn MappedRegion>> {
-        unimplemented!()
+    fn remove_memory_region(&self, slot: MemSlot) -> Result<Box<dyn MappedRegion>> {
+        // iceland gvm: runtime GuestAccept shares: guest release first, then reclaim.
+        let share = match self.runtime_shares.lock().remove(&slot) {
+            Some(s) => s,
+            None => {
+                error!("gunyah: removing non-runtime memory slot {} is not supported", slot);
+                return Err(Error::new(ENOTSUP));
+            }
+        };
+        let gpa = share.guest_addr.offset();
+        let res = gvm_accept::drive(gvm_accept::GvmAcceptOp::Release, 0, gpa, 0)
+            .and_then(|_| self.protected_unshare(share.label));
+        if let Err(e) = res {
+            error!("gvm-accept: could not take back {:#x}: {}; the pages stay shared", gpa, e);
+            // Keep the mapping alive: the guest may still reach these pages.
+            self.runtime_shares.lock().insert(slot, share);
+            return Err(e);
+        }
+        self.mem_slot_gaps.lock().push(Reverse(slot));
+        Ok(share.region)
+    }
+
+    fn note_region_source(&self, descriptor: RawDescriptor, offset: u64) {
+        *self.source_hint.lock() = Some((descriptor, offset));
     }
 
     fn create_device(&self, _kind: DeviceKind) -> Result<SafeDescriptor> {

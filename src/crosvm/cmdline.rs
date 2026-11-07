@@ -3242,6 +3242,15 @@ impl TryFrom<RunCommand> for super::config::Config {
             ProtectionType::Unprotected
         };
 
+        // iceland gvm: runtime GuestAccept transport for protected Gunyah VMs (opt-in).
+        #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+        if cfg.protection_type.isolates_memory()
+            && hypervisor::gunyah::gvm_accept::accept_enabled_by_env()
+        {
+            cfg.virtio_device_modules
+                .push(device_virtio_gvm_accept::GvmAcceptModule.into());
+        }
+
         if !matches!(cfg.protection_type, ProtectionType::Unprotected) {
             // USB devices only work for unprotected VMs.
             cfg.usb = false;

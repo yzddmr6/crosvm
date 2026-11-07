@@ -218,6 +218,11 @@ pub trait Vm: Send + Sync {
     /// Removes and drops the `UserMemoryRegion` that was previously added at the given slot.
     fn remove_memory_region(&self, slot: MemSlot) -> Result<Box<dyn MappedRegion>>;
 
+    /// Tells the hypervisor which descriptor (and offset) backs the region the next
+    /// `add_memory_region` call maps. Only meaningful for hypervisors that must hand the
+    /// backing pages to the guest by reference (Gunyah protected VMs: dma-buf share).
+    fn note_region_source(&self, _descriptor: base::RawDescriptor, _offset: u64) {}
+
     /// Creates an emulated device.
     fn create_device(&self, kind: DeviceKind) -> Result<SafeDescriptor>;
 

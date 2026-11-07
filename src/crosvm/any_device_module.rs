@@ -79,6 +79,8 @@ declare_any_virtio_device_module! {
     #[derive(Serialize, Deserialize)]
     pub enum AnyVirtioDeviceModule {
         Rng(device_virtio_rng::VirtioRngModule),
+        #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+        GvmAccept(device_virtio_gvm_accept::GvmAcceptModule),
         #[cfg(feature = "vtpm")]
         Tpm(device_virtio_tpm::VirtioTpmModule),
         Vsock(device_virtio_vsock::VirtioVsockModule),

@@ -161,6 +161,7 @@ device_virtio_fs = { path = "devices/device_virtio_fs" }
 device_virtio_net = { path = "devices/device_virtio_net" }
 device_virtio_pmem = { path = "devices/device_virtio_pmem" }
 device_virtio_rng = { path = "devices/device_virtio_rng" }
+device_virtio_gvm_accept = { path = "devices/device_virtio_gvm_accept" }
 device_virtio_scsi = { path = "devices/device_virtio_scsi" }
 device_virtio_snd = { path = "devices/device_virtio_snd" }
 device_virtio_tpm = { path = "devices/device_virtio_tpm" }
@@ -373,7 +374,7 @@ media = ["devices/media"]
 geniezone = ["devices/geniezone", "hypervisor/geniezone"]
 
 ## Enables the use of the Gunyah hypervisor
-gunyah = ["devices/gunyah", "hypervisor/gunyah"]
+gunyah = ["devices/gunyah", "hypervisor/gunyah", "dep:device_virtio_gvm_accept"]
 
 ## Enables the use of the Halla hypervisor
 halla = ["devices/halla", "hypervisor/halla"]
@@ -606,6 +607,7 @@ device_virtio_block = { workspace = true }
 device_virtio_console = { workspace = true }
 device_virtio_net = { workspace = true, optional = true }
 device_virtio_rng = { workspace = true }
+device_virtio_gvm_accept = { workspace = true, optional = true }
 device_virtio_scsi = { workspace = true }
 device_virtio_snd = { workspace = true, optional = true }
 device_virtio_tpm = { workspace = true, optional = true }

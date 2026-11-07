@@ -10,6 +10,7 @@
 
 use base::ioctl_io_nr;
 use base::ioctl_iow_nr;
+use base::ioctl_iowr_nr;
 
 // generated with gunyah_sys/bindgen.sh
 pub mod bindings;
@@ -72,3 +73,53 @@ ioctl_iow_nr!(
     gunyah_auth_desc
 );
 ioctl_io_nr!(GH_VM_CHECK_EXTENSION, GH_ANDROID_IOCTL_TYPE, 0x17);
+
+// iceland gvm: runtime protected share (GuestAccept), kernel patch 0008
+// ("virt: gunyah: Add runtime protected share (GuestAccept) ioctls", SuperTurtleDev 06416a1eae).
+pub const GH_CAP_PROTECTED_SHARE: u64 = 1;
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct gunyah_protected_share {
+    pub label: u32,
+    pub flags: u32,
+    pub guest_phys_addr: u64,
+    pub memory_size: u64,
+    pub userspace_addr: u64,
+    pub mem_handle: u32,
+    pub reserved: u32,
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct gunyah_protected_share_dmabuf {
+    pub label: u32,
+    pub flags: u32,
+    pub guest_phys_addr: u64,
+    pub memory_size: u64,
+    pub dmabuf_offset: u64,
+    pub dmabuf_fd: i32,
+    pub mem_handle: u32,
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct gunyah_protected_unshare {
+    pub label: u32,
+    pub reserved: u32,
+}
+ioctl_iowr_nr!(
+    GH_VM_PROTECTED_SHARE,
+    GH_ANDROID_IOCTL_TYPE,
+    0x18,
+    gunyah_protected_share
+);
+ioctl_iowr_nr!(
+    GH_VM_PROTECTED_SHARE_DMABUF,
+    GH_ANDROID_IOCTL_TYPE,
+    0x19,
+    gunyah_protected_share_dmabuf
+);
+ioctl_iow_nr!(
+    GH_VM_PROTECTED_UNSHARE,
+    GH_ANDROID_IOCTL_TYPE,
+    0x1a,
+    gunyah_protected_unshare
+);

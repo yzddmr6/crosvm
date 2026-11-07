@@ -144,6 +144,19 @@ impl VmAArch64 for GunyahVm {
             bell_node.set_prop("interrupts", &interrupts)?;
         }
 
+        if self.protected && super::gvm_accept::accept_enabled_by_env() {
+            // iceland gvm: ask the RM for an RM-RPC msgq pair; it generates
+            // /hypervisor/qcom,resource-mgr (compatible "gunyah-resource-manager",
+            // reg = <tx_capid rx_capid>) for the guest's MEM_ACCEPT / MEM_RELEASE.
+            let rm_node = vdev_node.subnode_mut("rm-rpc")?;
+            rm_node.set_prop("vdevice-type", "rm-rpc")?;
+            rm_node.set_prop("generate", "/hypervisor/qcom,resource-mgr")?;
+            rm_node.set_prop("console-dev", ())?;
+            rm_node.set_prop("message-size", 0xf0u32)?;
+            rm_node.set_prop("queue-depth", 0x8u32)?;
+            rm_node.set_prop("qcom,label", 0x1u32)?;
+        }
+
         for region in self.guest_mem.regions() {
             let create_shm_node = match region.options.purpose {
                 MemoryRegionPurpose::Bios => false,

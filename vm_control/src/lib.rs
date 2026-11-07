@@ -863,6 +863,10 @@ impl VmMemoryRequest {
                     return resp;
                 }
 
+                let source_offset = match &source {
+                    VmMemorySource::Descriptor { offset, .. } => *offset,
+                    _ => 0,
+                };
                 // Correct on Windows because callers of this IPC guarantee descriptor is a mapping
                 // handle.
                 let (mapped_region, size, descriptor) = match source
@@ -876,6 +880,9 @@ impl VmMemoryRequest {
                     Ok((region, size, descriptor)) => (region, size, descriptor),
                     Err(e) => return VmMemoryResponse::Err(e.into()),
                 };
+                if let Some(d) = descriptor.as_ref() {
+                    vm.note_region_source(d.as_raw_descriptor(), source_offset);
+                }
 
                 let guest_addr = match dest
                     .allocate(sys_allocator, size)

@@ -1,0 +1,21 @@
+[package]
+name = "device_virtio_gvm_accept"
+version = "0.1.0"
+authors = ["The iceland-mainline authors"]
+edition = "2021"
+license = "BSD-3-Clause"
+
+[features]
+
+[dependencies]
+anyhow = { workspace = true }
+base = { workspace = true }
+devices = { workspace = true }
+hypervisor = { workspace = true, features = ["gunyah"] }
+serde = { workspace = true, features = [ "derive", "rc" ] }
+snapshot = { workspace = true }
+vm_memory = { workspace = true }
+
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+jail = { workspace = true }
+minijail = "*"
