@@ -820,6 +820,18 @@ impl VirtioGpu {
         )
     }
 
+    /// iceland gvm: flush every resource that is currently on a scanout once more (refresh timer).
+    pub fn gvm_refresh_scanouts(&mut self) {
+        let ids: Vec<u32> = self
+            .scanouts
+            .values()
+            .filter_map(|s| s.resource_id.map(|r| r.get()))
+            .collect();
+        for id in ids {
+            let _ = self.flush_resource(id);
+        }
+    }
+
     /// If the resource is the scanout resource, flush it to the display.
     pub fn flush_resource(&mut self, resource_id: u32) -> VirtioGpuResult {
         if resource_id == 0 {

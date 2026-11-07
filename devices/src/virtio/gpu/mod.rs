@@ -30,6 +30,8 @@ use base::info;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 use base::linux::move_task_to_cgroup;
 use base::warn;
+use base::Timer;
+use base::TimerTrait;
 use base::AsRawDescriptor;
 use base::Event;
 use base::EventToken;
@@ -803,6 +805,11 @@ impl Frontend {
     pub fn event_poll(&self) {
         self.virtio_gpu.event_poll();
     }
+
+    /// iceland gvm: present every scanout again (CROSVM_GVM_REFRESH_MS timer).
+    pub fn gvm_refresh(&mut self) {
+        self.virtio_gpu.gvm_refresh_scanouts();
+    }
 }
 
 #[derive(EventToken, PartialEq, Eq, Clone, Copy, Debug)]
@@ -817,6 +824,7 @@ enum WorkerToken {
         index: usize,
     },
     VirtioGpuPoll,
+    GvmRefresh,
     #[cfg(windows)]
     DisplayDescriptorRequest,
 }
@@ -1211,6 +1219,28 @@ impl Worker {
                 .context("failed adding poll event to WaitContext")?;
         }
 
+        // iceland gvm: CROSVM_GVM_REFRESH_MS=N re-presents the scanouts every N ms even without a guest flush.
+        // vm-run v5 (q90r): continuously rendering GL clients (kmscube) were drawn, idle GL compositors (glamor,
+        // weston-GL) black although the guest drew; a late re-read catches content that completed after the flush.
+        let gvm_refresh_ms = std::env::var("CROSVM_GVM_REFRESH_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&ms| ms > 0);
+        let mut gvm_refresh_timer: Option<Timer> = None;
+        let gvm_refresh_desc: SafeDescriptor;
+        if let Some(ms) = gvm_refresh_ms {
+            let mut t = Timer::new().context("failed to create the gvm refresh timer")?;
+            t.reset_repeating(std::time::Duration::from_millis(ms.max(16)))
+                .context("failed to arm the gvm refresh timer")?;
+            gvm_refresh_desc = SafeDescriptor::try_from(&t as &dyn AsRawDescriptor)
+                .context("failed to clone the gvm refresh timer")?;
+            event_manager
+                .add(&gvm_refresh_desc, WorkerToken::GvmRefresh)
+                .context("failed adding the gvm refresh timer")?;
+            warn!("GVM-REFRESH every {} ms", ms.max(16));
+            gvm_refresh_timer = Some(t);
+        }
+
         self.resource_bridges
             .add_to_wait_context(&mut event_manager.wait_ctx);
 
@@ -1312,6 +1342,12 @@ impl Worker {
                     }
                     WorkerToken::VirtioGpuPoll => {
                         self.state.event_poll();
+                    }
+                    WorkerToken::GvmRefresh => {
+                        if let Some(t) = gvm_refresh_timer.as_mut() {
+                            let _ = t.mark_waited();
+                        }
+                        self.state.gvm_refresh();
                     }
                     WorkerToken::Sleep => {
                         return Ok(WorkerStopReason::Sleep);
