@@ -63,6 +63,43 @@ pub struct GvmAcceptResponse {
 static LINK: Mutex<Option<Tube>> = Mutex::new(None);
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// iceland gvm (parity step 3): what a runtime blob share costs, to decide on DroidVM-style pre-shared pools.
+/// kind 0 = map (SHARE ioctl + guest MEM_ACCEPT), 1 = unmap (guest MEM_RELEASE + UNSHARE).
+static STAT_N: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static STAT_US: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static STAT_MAX_US: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static STAT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Records one map / unmap; every 64th map and every 64th unmap logs a GVM-ACCEPT-STATS line.
+pub fn record(kind: usize, elapsed: Duration, bytes: u64) {
+    let us = elapsed.as_micros() as u64;
+    let n = STAT_N[kind].fetch_add(1, Ordering::Relaxed) + 1;
+    STAT_US[kind].fetch_add(us, Ordering::Relaxed);
+    STAT_MAX_US[kind].fetch_max(us, Ordering::Relaxed);
+    if kind == 0 {
+        STAT_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+    if n == 1 || n % 64 == 0 {
+        log_stats();
+    }
+}
+
+/// `GVM-ACCEPT-STATS maps=N map_avg_us= map_max_us= mapped_mib= unmaps=N unmap_avg_us= unmap_max_us=`
+pub fn log_stats() {
+    let (m, u) = (STAT_N[0].load(Ordering::Relaxed), STAT_N[1].load(Ordering::Relaxed));
+    let avg = |k: usize, n: u64| if n == 0 { 0 } else { STAT_US[k].load(Ordering::Relaxed) / n };
+    base::warn!(
+        "GVM-ACCEPT-STATS maps={} map_avg_us={} map_max_us={} mapped_mib={} unmaps={} unmap_avg_us={} unmap_max_us={}",
+        m,
+        avg(0, m),
+        STAT_MAX_US[0].load(Ordering::Relaxed),
+        STAT_BYTES.load(Ordering::Relaxed) >> 20,
+        u,
+        avg(1, u),
+        STAT_MAX_US[1].load(Ordering::Relaxed)
+    );
+}
+
 /// How long one accept / release may take: an RM RPC from the guest is well below a millisecond,
 /// the budget covers the virtqueue interrupt and the guest workqueue.
 pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(3);

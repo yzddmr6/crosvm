@@ -567,6 +567,7 @@ impl GunyahVm {
         mem_region: &dyn MappedRegion,
     ) -> Result<u32> {
         let label = 0x4000_0000 | slot;
+        let t0 = std::time::Instant::now();
         let mut flags = GUNYAH_MEM_ALLOW_READ;
         if !read_only {
             flags |= GUNYAH_MEM_ALLOW_WRITE;
@@ -626,6 +627,7 @@ impl GunyahVm {
             let _ = self.protected_unshare(label);
             return Err(e);
         }
+        gvm_accept::record(0, t0.elapsed(), size);
         Ok(label)
     }
 
@@ -821,8 +823,12 @@ impl Vm for GunyahVm {
             }
         };
         let gpa = share.guest_addr.offset();
+        let t0 = std::time::Instant::now();
         let res = gvm_accept::drive(gvm_accept::GvmAcceptOp::Release, 0, gpa, 0)
             .and_then(|_| self.protected_unshare(share.label));
+        if res.is_ok() {
+            gvm_accept::record(1, t0.elapsed(), 0);
+        }
         if let Err(e) = res {
             error!("gvm-accept: could not take back {:#x}: {}; the pages stay shared", gpa, e);
             // Keep the mapping alive: the guest may still reach these pages.
