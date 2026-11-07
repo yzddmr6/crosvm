@@ -145,7 +145,13 @@ impl VmAArch64 for GunyahVm {
             bell_node.set_prop("interrupts", &interrupts)?;
         }
 
-        if self.protected && super::gvm_accept::accept_enabled_by_env() {
+        // pvm51: the shared memory mode's boot shim accepts the RAM window over the same RM-RPC queue, so the
+        // node must exist in that mode too (the shim found /hypervisor with doorbells but no RM node: no rm-rpc
+        // vdevice had been requested, because CROSVM_GVM_ACCEPT was only set for the 3D display).
+        if self.protected
+            && (super::gvm_accept::accept_enabled_by_env()
+                || self.hv_cfg.protection_type.shares_guest_ram())
+        {
             // iceland gvm: ask the RM for an RM-RPC msgq pair; it generates
             // /hypervisor/qcom,resource-mgr (compatible "gunyah-resource-manager",
             // reg = <tx_capid rx_capid>) for the guest's MEM_ACCEPT / MEM_RELEASE.
