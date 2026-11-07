@@ -224,18 +224,33 @@ fn gvm_report(outs: Vec<crate::gvm_input::Out>) -> Option<GpuDisplayEvents> {
     let mut events = Vec::new();
     for o in outs {
         match o {
-            Out::MtDown { slot, id, x, y } => events.extend([
-                virtio_input_event::multitouch_slot(slot),
-                virtio_input_event::multitouch_tracking_id(id),
-                virtio_input_event::multitouch_absolute_x(max(0, x)),
-                virtio_input_event::multitouch_absolute_y(max(0, y)),
-                virtio_input_event::touch(true),
-            ]),
-            Out::MtMove { slot, x, y } => events.extend([
-                virtio_input_event::multitouch_slot(slot),
-                virtio_input_event::multitouch_absolute_x(max(0, x)),
-                virtio_input_event::multitouch_absolute_y(max(0, y)),
-            ]),
+            Out::MtDown { slot, id, x, y } => {
+                events.extend([
+                    virtio_input_event::multitouch_slot(slot),
+                    virtio_input_event::multitouch_tracking_id(id),
+                    virtio_input_event::multitouch_absolute_x(max(0, x)),
+                    virtio_input_event::multitouch_absolute_y(max(0, y)),
+                ]);
+                // iceland gvm: single-touch pointer emulation like a kernel touchscreen driver
+                // (input_mt_report_pointer_emulation): the device advertises ABS_X / ABS_Y, so
+                // readers that use them (evdev, X11 evdev) must not see 0,0 (p4 VINX).
+                if slot == 0 {
+                    events.push(virtio_input_event::absolute_x(max(0, x)));
+                    events.push(virtio_input_event::absolute_y(max(0, y)));
+                }
+                events.push(virtio_input_event::touch(true));
+            }
+            Out::MtMove { slot, x, y } => {
+                events.extend([
+                    virtio_input_event::multitouch_slot(slot),
+                    virtio_input_event::multitouch_absolute_x(max(0, x)),
+                    virtio_input_event::multitouch_absolute_y(max(0, y)),
+                ]);
+                if slot == 0 {
+                    events.push(virtio_input_event::absolute_x(max(0, x)));
+                    events.push(virtio_input_event::absolute_y(max(0, y)));
+                }
+            }
             Out::MtUp { slot, last } => {
                 events.push(virtio_input_event::multitouch_slot(slot));
                 events.push(virtio_input_event::multitouch_tracking_id(-1));
@@ -436,6 +451,8 @@ impl DisplayT for DisplayWl {
                     virtio_input_event::multitouch_tracking_id(tracking_id),
                     virtio_input_event::multitouch_absolute_x(max(0, event.params[0])),
                     virtio_input_event::multitouch_absolute_y(max(0, event.params[1])),
+                    virtio_input_event::absolute_x(max(0, event.params[0])),
+                    virtio_input_event::absolute_y(max(0, event.params[1])),
                     virtio_input_event::touch(true),
                 ];
                 Some(GpuDisplayEvents {
