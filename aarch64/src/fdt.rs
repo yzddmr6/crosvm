@@ -515,7 +515,11 @@ fn create_pci_nodes(
     ];
 
     let pci_node = fdt.root_mut().subnode_mut("pci")?;
-    pci_node.set_prop("compatible", "pci-host-cam-generic")?;
+    // iceland gvm: ECAM per VM (CROSVM_GVM_PCI_ECAM=1, Windows guests), CAM otherwise
+    pci_node.set_prop(
+        "compatible",
+        if crate::gvm_pci_ecam() { "pci-host-ecam-generic" } else { "pci-host-cam-generic" },
+    )?;
     pci_node.set_prop("device_type", "pci")?;
     pci_node.set_prop("ranges", ranges)?;
     pci_node.set_prop("bus-range", &bus_range)?;

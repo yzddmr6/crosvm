@@ -165,6 +165,32 @@ const AARCH64_VMWDT_SIZE: u64 = 0x1000;
 const AARCH64_PCI_CAM_BASE_DEFAULT: u64 = 0x10000;
 // Default PCI MMIO configuration region size.
 const AARCH64_PCI_CAM_SIZE_DEFAULT: u64 = 0x1000000;
+// iceland gvm: PCIe ECAM (CROSVM_GVM_PCI_ECAM=1, per VM, for Windows guests): the ACPI tables edk2's
+// DynamicTablesPkg builds only describe a "pci-host-ecam-generic" root (MCFG). bus-range is [0, 0], so one bus
+// takes 1 MiB of ECAM space. After DroidVM dvm-crosvm 7d4712a (made optional so proven Linux VMs keep CAM).
+const AARCH64_PCI_ECAM_SIZE_DEFAULT: u64 = 0x100000;
+
+/// iceland gvm: true when this VM uses a PCIe ECAM root instead of CAM (CROSVM_GVM_PCI_ECAM=1).
+pub fn gvm_pci_ecam() -> bool {
+    static ECAM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ECAM.get_or_init(|| std::env::var("CROSVM_GVM_PCI_ECAM").is_ok_and(|v| v == "1"))
+}
+
+fn pci_cam_size_default() -> u64 {
+    if gvm_pci_ecam() {
+        AARCH64_PCI_ECAM_SIZE_DEFAULT
+    } else {
+        AARCH64_PCI_CAM_SIZE_DEFAULT
+    }
+}
+
+fn pci_cam_shift() -> usize {
+    if gvm_pci_ecam() {
+        12
+    } else {
+        8
+    }
+}
 // Default PCI mem base address.
 const AARCH64_PCI_MEM_BASE_DEFAULT: u64 = 0x2000000;
 // Default PCI mem size.
@@ -472,14 +498,14 @@ impl arch::LinuxArch for AArch64 {
     ) -> std::result::Result<Self::ArchMemoryLayout, Self::Error> {
         let (pci_cam_start, pci_cam_size) = match components.pci_config.cam {
             Some(MemoryRegionConfig { start, size }) => {
-                (start, size.unwrap_or(AARCH64_PCI_CAM_SIZE_DEFAULT))
+                (start, size.unwrap_or(pci_cam_size_default()))
             }
-            None => (AARCH64_PCI_CAM_BASE_DEFAULT, AARCH64_PCI_CAM_SIZE_DEFAULT),
+            None => (AARCH64_PCI_CAM_BASE_DEFAULT, pci_cam_size_default()),
         };
         // TODO: Make the PCI slot allocator aware of the CAM size so we can remove this check.
-        if pci_cam_size != AARCH64_PCI_CAM_SIZE_DEFAULT {
+        if pci_cam_size != pci_cam_size_default() {
             return Err(Error::ConfigurePciCam(format!(
-                "PCI CAM size must be {AARCH64_PCI_CAM_SIZE_DEFAULT:#x}, got {pci_cam_size:#x}"
+                "PCI CAM size must be {:#x}, got {pci_cam_size:#x}", pci_cam_size_default()
             )));
         }
         let pci_cam = AddressRange::from_start_and_size(pci_cam_start, pci_cam_size).ok_or(
@@ -836,7 +862,7 @@ impl arch::LinuxArch for AArch64 {
                 &*irq_chip,
                 mmio_bus.clone(),
                 GuestAddress(arch_memory_layout.pci_cam.start),
-                8,
+                pci_cam_shift(),
                 io_bus.clone(),
                 system_allocator,
                 &*vm,
@@ -848,7 +874,7 @@ impl arch::LinuxArch for AArch64 {
             .map_err(Error::CreatePciRoot)?;
 
         let pci_root = Arc::new(Mutex::new(pci));
-        let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci_root.clone(), 8)));
+        let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci_root.clone(), pci_cam_shift())));
         let (platform_devices, _others): (Vec<_>, Vec<_>) = others
             .into_iter()
             .partition(|(dev, _)| dev.as_platform_device().is_some());

@@ -1055,7 +1055,22 @@ impl Vcpu for GunyahVcpu {
                     }),
                     GH_VM_STATUS_GH_VM_STATUS_CRASHED => Ok(VcpuExit::SystemEventCrash),
                     GH_VM_STATUS_GH_VM_STATUS_EXITED => {
-                        info!("exit type {}", status.exit_info.type_);
+                        // iceland gvm: always logged with a marker: on our host a PSCI SYSTEM_RESET
+                        // ended crosvm with exit 0, so supervisors detect a guest reboot (Windows prints no
+                        // console line) from "GVM-EXIT type=2|3" in the log.
+                        let t = status.exit_info.type_;
+                        let name = match t {
+                            GH_RM_EXIT_TYPE_VM_EXIT => "vm-exit",
+                            GH_RM_EXIT_TYPE_PSCI_POWER_OFF => "psci-power-off",
+                            GH_RM_EXIT_TYPE_PSCI_SYSTEM_RESET => "psci-system-reset",
+                            GH_RM_EXIT_TYPE_PSCI_SYSTEM_RESET2 => "psci-system-reset2",
+                            GH_RM_EXIT_TYPE_WDT_BITE => "watchdog-bite",
+                            GH_RM_EXIT_TYPE_HYP_ERROR => "hyp-error",
+                            GH_RM_EXIT_TYPE_ASYNC_EXT_ABORT => "async-ext-abort",
+                            GH_RM_EXIT_TYPE_VM_FORCE_STOPPED => "force-stopped",
+                            _ => "unknown",
+                        };
+                        warn!("GVM-EXIT type={} ({})", t, name);
                         match status.exit_info.type_ {
                             GH_RM_EXIT_TYPE_VM_EXIT => Ok(VcpuExit::SystemEventShutdown),
                             GH_RM_EXIT_TYPE_PSCI_POWER_OFF => Ok(VcpuExit::SystemEventShutdown),
