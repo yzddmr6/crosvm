@@ -247,12 +247,30 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
             Ok(t) => t,
             Err(_) => die(0, "the device tree header did not parse"),
         };
-        let (at, len) = match tree.find_prop(
-            fdt::Match::Compatible("gunyah-resource-manager"),
-            "reg",
-        ) {
+        // iceland gvm (p7): the guest kernel finds "gunyah-resource-manager", but the shim did not
+        // (error 5, /hypervisor present). Try the Qualcomm compatibles too, and if none matches print
+        // the whole /hypervisor subtree (names + compatibles) so the next run says what is there.
+        let found = ["gunyah-resource-manager", "qcom,resource-manager-1-0", "qcom,resource-manager"]
+            .iter()
+            .find_map(|c| tree.find_prop(fdt::Match::Compatible(c), "reg").ok());
+        let (at, len) = match found.ok_or(fdt::Error::NotFound) {
             Ok(hit) => hit,
             Err(e) => {
+                uart_str("SHIM: /hypervisor:");
+                tree.for_each_node_under("hypervisor", |d, name, compat| {
+                    uart_str(" [");
+                    uart_hex(d as u64);
+                    uart_str(" ");
+                    for &b in name.iter().take(40) {
+                        uart(b);
+                    }
+                    uart_str(" = ");
+                    for &b in compat.iter().take(60) {
+                        uart(if b == 0 { b'|' } else { b });
+                    }
+                    uart_str("]");
+                });
+                uart_str("\r\n");
                 // What the tree does have at the top, for the next diagnosis.
                 uart_str("SHIM: root nodes:");
                 tree.for_each_root_child(|name| {

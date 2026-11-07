@@ -210,6 +210,64 @@ impl<'a> Fdt<'a> {
         self.blob.len()
     }
 
+    /// Calls `f(depth, node name, compatible)` for every node below the root child `root_child`
+    /// (iceland gvm diagnostics: what the resource manager really put under /hypervisor). The
+    /// compatible is the raw property value (NUL-separated list), empty when the node has none.
+    pub fn for_each_node_under(&self, root_child: &str, mut f: impl FnMut(usize, &[u8], &[u8])) {
+        let mut depth = 0usize;
+        let mut inside = 0usize; // depth at which the wanted root child opened, 0 = not inside
+        let mut p = self.struct_off;
+        let end = self.struct_off + self.struct_len;
+        let mut pending: Option<(usize, &[u8])> = None;
+        while p < end {
+            let Ok(tag) = be32(self.blob, p) else { return };
+            p += 4;
+            match tag {
+                FDT_BEGIN_NODE => {
+                    if let Some((d, n)) = pending.take() {
+                        f(d, n, &[]);
+                    }
+                    let Ok(name) = cstr(self.blob, p) else { return };
+                    p += (name.len() + 4) & !3;
+                    depth += 1;
+                    if inside == 0 && depth == 2 && name == root_child.as_bytes() {
+                        inside = depth;
+                    }
+                    if inside != 0 && depth >= inside {
+                        pending = Some((depth - inside, name));
+                    }
+                }
+                FDT_END_NODE => {
+                    if let Some((d, n)) = pending.take() {
+                        f(d, n, &[]);
+                    }
+                    if inside != 0 && depth == inside {
+                        return;
+                    }
+                    if depth == 0 {
+                        return;
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let Ok(len) = be32(self.blob, p) else { return };
+                    let Ok(nameoff) = be32(self.blob, p + 4) else { return };
+                    let val_at = p + 8;
+                    p = val_at + ((len as usize + 3) & !3);
+                    if let Some((d, n)) = pending {
+                        if self.prop_name(nameoff as usize).ok() == Some(&b"compatible"[..]) {
+                            let v = self.blob.get(val_at..val_at + len as usize).unwrap_or(&[]);
+                            f(d, n, v);
+                            pending = None;
+                        }
+                    }
+                }
+                FDT_NOP => {}
+                _ => return,
+            }
+        }
+    }
+
     /// Calls `f` with the name of every direct child of the root (iceland gvm diagnostics).
     pub fn for_each_root_child(&self, mut f: impl FnMut(&[u8])) {
         let mut depth = 0usize;
@@ -345,6 +403,22 @@ mod tests {
         }
         assert_ne!(be64(&reg[0..8]).unwrap(), 0x4000_0000, "the donation is gone");
         assert_ne!(be64(&reg[0..8]).unwrap(), 0x8000_0000, "the boot region is gone");
+    }
+
+    #[test]
+    fn the_hypervisor_subtree_is_listed() {
+        let mut b = blob();
+        let tree = Fdt::new(&mut b).unwrap();
+        let mut seen = 0;
+        let mut rm = false;
+        tree.for_each_node_under("hypervisor", |_, name, compat| {
+            seen += 1;
+            if name == b"qcom,resource-mgr" && compat.starts_with(b"gunyah-resource-manager") {
+                rm = true;
+            }
+        });
+        assert!(seen >= 4, "hypervisor and its three children");
+        assert!(rm, "the resource manager node and its compatible");
     }
 
     #[test]
