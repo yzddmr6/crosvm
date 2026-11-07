@@ -448,6 +448,11 @@ fn default_keyboard_events() -> BTreeMap<u16, virtio_input_bitmap> {
             KEY_INSERT,
             KEY_DELETE,
             KEY_PAUSE,
+            // iceland gvm (kbd grab, kit-vm22 K-3): Super / Menu reach the guest (the guest kernel drops keys the
+            // device does not advertise)
+            KEY_LEFTMETA,
+            KEY_RIGHTMETA,
+            KEY_COMPOSE,
             KEY_MENU,
             KEY_PRINT,
             KEY_POWER,
