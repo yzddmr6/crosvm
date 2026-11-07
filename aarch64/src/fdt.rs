@@ -733,6 +733,23 @@ pub fn create_fdt(
         });
     }
 
+    // iceland gvm: the pseudo-unprotected mode's handoff page is in /memory (see arch/src/fdt.rs):
+    // keep it away from the guest's allocator like the framebuffer.
+    if let Some(h) = guest_mem
+        .regions()
+        .find(|r| r.options.purpose == vm_memory::MemoryRegionPurpose::ShimHandoff)
+    {
+        reserved_memory_regions.push(ReservedMemoryRegion {
+            address: Some(h.guest_addr),
+            size: h.size as u64,
+            phandle: None,
+            name: "shim_handoff",
+            compatible: Some("droidvm,shim-handoff"),
+            alignment: None,
+            no_map: true,
+        });
+    }
+
     create_reserved_memory_node(&mut fdt, &reserved_memory_regions)?;
     if let Some(sfb) = &simplefb {
         crate::simplefb::create_simplefb_node(&mut fdt, sfb, PHANDLE_SIMPLEFB_RESERVED)?;

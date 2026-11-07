@@ -205,12 +205,20 @@ pub fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> 
             #[cfg(target_arch = "aarch64")]
             MemoryRegionPurpose::StaticSwiotlbRegion => true,
             // iceland gvm (from DroidVM): a pseudo-unprotected VM's window is not the guest's
-            // RAM until the boot shim has accepted it and pointed /memory at it itself; the
-            // handoff page never is.
+            // RAM until the boot shim has accepted it and pointed /memory at it itself.
             #[cfg(target_arch = "aarch64")]
             MemoryRegionPurpose::SharedGuestRam => false,
+            // The handoff page IS described here, like the swiotlb and the framebuffer: on our
+            // host (demand-shared SHARE bindings) the resource manager forwards a protected
+            // guest's faults only for shared memory it saw in /memory; left out, the shim's first
+            // read of it took a synchronous external abort (p5 PV-A: esr 0x96000010 far
+            // 0x80400000) with no host fault at all. A no-map reserved-memory node keeps it from
+            // the guest's allocator, and the shim drops it from /memory before the kernel runs.
+            // ICELAND_SHIM_HANDOFF_MEMORY=0 (diagnostic) restores the p5 layout.
             #[cfg(target_arch = "aarch64")]
-            MemoryRegionPurpose::ShimHandoff => false,
+            MemoryRegionPurpose::ShimHandoff => {
+                std::env::var("ICELAND_SHIM_HANDOFF_MEMORY").map_or(true, |v| v != "0")
+            }
         })
         .collect();
     regions.sort_by(|a, b| a.guest_addr.cmp(&b.guest_addr));
