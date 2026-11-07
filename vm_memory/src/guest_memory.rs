@@ -148,6 +148,17 @@ pub enum MemoryRegionPurpose {
     #[cfg(target_arch = "aarch64")]
     SharedFramebuffer,
 
+    /// iceland gvm (from DroidVM): the guest's RAM in a pseudo-unprotected VM. Neither lent nor
+    /// shared when the VM is created; the host shares it after GH_VM_START and the boot shim
+    /// accepts it before the payload runs. Not described in `/memory` until the shim does so.
+    #[cfg(target_arch = "aarch64")]
+    SharedGuestRam,
+
+    /// iceland gvm (from DroidVM): the page a pseudo-unprotected VM's host and boot shim talk
+    /// through. Shared (never lent), so the host can still write it after the VM has started.
+    #[cfg(target_arch = "aarch64")]
+    ShimHandoff,
+
     #[cfg(target_arch = "aarch64")]
     StaticSwiotlbRegion,
 }

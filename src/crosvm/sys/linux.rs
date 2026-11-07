@@ -1428,7 +1428,12 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             size.checked_mul(1024 * 1024)
                 .ok_or_else(|| anyhow!("requested swiotlb size too large"))?,
         )
-    } else if matches!(cfg.protection_type, ProtectionType::Unprotected) {
+    } else if matches!(
+        cfg.protection_type,
+        // iceland gvm: a pseudo-unprotected VM's RAM is shared, so the host reaches every buffer
+        // directly and no bounce pool is needed (or wanted).
+        ProtectionType::Unprotected | ProtectionType::ProtectedPseudoUnprotected
+    ) {
         None
     } else {
         Some(64 * 1024 * 1024)

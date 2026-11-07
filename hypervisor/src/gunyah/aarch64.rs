@@ -169,6 +169,11 @@ impl VmAArch64 for GunyahVm {
                 // guest gets its stage-2 mapping at boot (no runtime accept).
                 MemoryRegionPurpose::SharedFramebuffer => true,
                 MemoryRegionPurpose::StaticSwiotlbRegion => true,
+                // iceland gvm (from DroidVM): the pseudo-unprotected window is handed over only
+                // after GH_VM_START, so no shm vdevice describes it; the handoff page is shared
+                // at creation like the swiotlb and gets one.
+                MemoryRegionPurpose::SharedGuestRam => false,
+                MemoryRegionPurpose::ShimHandoff => true,
             };
 
             if create_shm_node {

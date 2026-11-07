@@ -1720,6 +1720,12 @@ pub struct RunCommand {
     /// prevent host access to guest memory
     pub protected_vm: Option<bool>,
 
+    #[argh(switch)]
+    /// (EXPERIMENTAL, Gunyah only) run as a protected VM whose RAM is SHARED to it at run time
+    /// instead of lent before boot: the HOST CAN READ AND WRITE ALL OF THE GUEST'S MEMORY. A boot
+    /// shim inside the VM accepts the memory before the kernel runs; no bounce pool is needed
+    pub protected_vm_pseudo_unprotected: Option<bool>,
+
     #[argh(option, arg_name = "PATH")]
     /// (EXPERIMENTAL/FOR DEBUGGING) Use custom VM firmware to run in protected mode
     pub protected_vm_with_firmware: Option<PathBuf>,
@@ -3240,6 +3246,7 @@ impl TryFrom<RunCommand> for super::config::Config {
             cmd.protected_vm.unwrap_or_default(),
             cmd.protected_vm_with_firmware.is_some(),
             cmd.protected_vm_without_firmware.unwrap_or_default(),
+            cmd.protected_vm_pseudo_unprotected.unwrap_or_default(),
             cmd.unprotected_vm_with_firmware.is_some(),
         ];
 
@@ -3251,6 +3258,8 @@ impl TryFrom<RunCommand> for super::config::Config {
             ProtectionType::Protected
         } else if cmd.protected_vm_without_firmware.unwrap_or_default() {
             ProtectionType::ProtectedWithoutFirmware
+        } else if cmd.protected_vm_pseudo_unprotected.unwrap_or_default() {
+            ProtectionType::ProtectedPseudoUnprotected
         } else if let Some(p) = cmd.protected_vm_with_firmware {
             if !p.exists() || !p.is_file() {
                 return Err(

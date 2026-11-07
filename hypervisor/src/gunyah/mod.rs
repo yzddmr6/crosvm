@@ -7,6 +7,8 @@ mod aarch64;
 
 mod gunyah_sys;
 pub mod gvm_accept;
+#[cfg(target_arch = "aarch64")]
+pub mod shim_abi;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
@@ -280,10 +282,23 @@ impl GunyahVm {
                     MemoryRegionPurpose::SharedFramebuffer => false,
                     #[cfg(target_arch = "aarch64")]
                     MemoryRegionPurpose::StaticSwiotlbRegion => false,
+                    // iceland gvm (from DroidVM): the handoff page is shared so the host can
+                    // still write it after GH_VM_START. The window is skipped below.
+                    #[cfg(target_arch = "aarch64")]
+                    MemoryRegionPurpose::ShimHandoff => false,
+                    #[cfg(target_arch = "aarch64")]
+                    MemoryRegionPurpose::SharedGuestRam => false,
                 }
             } else {
                 false
             };
+            // iceland gvm (from DroidVM): the window of a pseudo-unprotected VM is not handed to
+            // the hypervisor here at all. It is shared after GH_VM_START (start()), because the
+            // guest has to accept it itself and there is no guest until then.
+            #[cfg(target_arch = "aarch64")]
+            if region.options.purpose == MemoryRegionPurpose::SharedGuestRam {
+                continue;
+            }
             // For QTVMs, the first provided file-backed region is always CMA and must be
             // mapped with GH_VM_ANDROID_MAP_CMA_MEM. Subsequent file-backed regions (if any)
             // are mapped normally. The `cma_mapped` flag tracks whether the CMA region has
@@ -551,10 +566,157 @@ impl GunyahVm {
         if ret == 0 {
             self.started
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(target_arch = "aarch64")]
+            self.share_guest_ram_window()?;
             Ok(())
         } else {
             errno_result()
         }
+    }
+
+    /// iceland gvm (pseudo-unprotected mode, after DroidVM): hand the guest its RAM.
+    ///
+    /// The window has sat in guest memory with the payload already written into it. Sharing it
+    /// with GH_VM_PROTECTED_SHARE (patch 0008) makes memparcels the guest can accept; their
+    /// handles go into the handoff page, where the boot shim waits for them. This cannot happen
+    /// earlier: a memparcel needs a running VM. EXEC is in the ACL because the payload runs from
+    /// the window. `ready` is written last, after every handle, because the shim spins on it.
+    #[cfg(target_arch = "aarch64")]
+    fn share_guest_ram_window(&self) -> Result<()> {
+        use crate::gunyah::shim_abi as abi;
+
+        if !self.hv_cfg.protection_type.shares_guest_ram() {
+            return Ok(());
+        }
+        let mem = self.guest_mem.clone();
+        let window = mem
+            .regions()
+            .find(|r| r.options.purpose == MemoryRegionPurpose::SharedGuestRam);
+        let handoff = mem
+            .regions()
+            .find(|r| r.options.purpose == MemoryRegionPurpose::ShimHandoff);
+        let (Some(window), Some(handoff)) = (window, handoff) else {
+            error!("GH-SHIM: no window or no handoff region; refusing to start");
+            return Err(Error::new(EINVAL));
+        };
+        let size = window.size as u64;
+        let ho = handoff.guest_addr;
+
+        // ICELAND_SHIM_PARCEL_MB: share the window in parcels of at most this many MiB
+        // (default 0 = one parcel). Each parcel costs one of the VM's 1024 memparcels.
+        let chunk = std::env::var("ICELAND_SHIM_PARCEL_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|mb| mb << 20)
+            .filter(|c| *c != 0)
+            .map(|c| c.next_multiple_of(2 << 20).min(size))
+            .unwrap_or(size);
+        let nparcels = size.div_ceil(chunk);
+        if nparcels > abi::SHIM_MAX_PARCELS as u64 {
+            error!(
+                "GH-SHIM: {:#x} of window in {:#x} chunks needs {} parcels; the handoff page holds {}",
+                size,
+                chunk,
+                nparcels,
+                abi::SHIM_MAX_PARCELS
+            );
+            return Err(Error::new(EINVAL));
+        }
+
+        let started = std::time::Instant::now();
+        let mut flags = GUNYAH_MEM_ALLOW_READ | GUNYAH_MEM_ALLOW_WRITE | GUNYAH_MEM_ALLOW_EXEC;
+        if std::env::var_os("ICELAND_SHIM_NO_EXEC").is_some_and(|v| v != "0") {
+            // Diagnostic only: repeat DroidVM's measurement that the payload needs X.
+            flags &= !GUNYAH_MEM_ALLOW_EXEC;
+        }
+        for i in 0..nparcels {
+            let off = i * chunk;
+            let len = chunk.min(size - off);
+            let at = window
+                .guest_addr
+                .checked_add(off)
+                .ok_or_else(|| Error::new(EINVAL))?;
+            let mut a = gunyah_protected_share {
+                label: 0x2000_0000 | i as u32,
+                flags,
+                guest_phys_addr: at.offset(),
+                memory_size: len,
+                // The region's own mapping in this process: the kernel pins its pages
+                // (FOLL_LONGTERM) for as long as the parcel lives, and sharing does not sanitise,
+                // so the payload written there before the VM started arrives intact.
+                userspace_addr: window.host_addr as u64 + off,
+                mem_handle: 0,
+                reserved: 0,
+            };
+            let t0 = std::time::Instant::now();
+            // SAFETY: the VM fd is valid, `a` a valid in/out argument and the mapping lives as
+            // long as the GuestMemory; the result is checked.
+            let ret = unsafe { ioctl_with_mut_ref(self, GH_VM_PROTECTED_SHARE, &mut a) };
+            if ret != 0 {
+                let e = Error::last();
+                error!(
+                    "GH-SHIM: share of window part {} ({:#x}+{:#x}) failed: {}",
+                    i,
+                    at.offset(),
+                    len,
+                    e
+                );
+                return Err(e);
+            }
+            info!(
+                "GH-SHIM: window part {} {:#x}+{:#x} shared, handle {:#x}, {:?}",
+                i,
+                at.offset(),
+                len,
+                a.mem_handle,
+                t0.elapsed()
+            );
+            let parcel = abi::ShimParcel {
+                handle: a.mem_handle,
+                reserved: 0,
+                base: at.offset(),
+                size: len,
+            };
+            let dst = ho
+                .checked_add(std::mem::offset_of!(abi::ShimHandoff, parcel) as u64)
+                .and_then(|p| p.checked_add(i * size_of::<abi::ShimParcel>() as u64))
+                .ok_or_else(|| Error::new(EINVAL))?;
+            // SAFETY: ShimParcel is repr(C) and made of integers; every byte pattern is valid.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &parcel as *const abi::ShimParcel as *const u8,
+                    size_of::<abi::ShimParcel>(),
+                )
+            };
+            mem.write_all_at_addr(bytes, dst)
+                .map_err(|_| Error::new(EINVAL))?;
+        }
+        // host= is this process's mapping of the window: gvm.sh's PV rows read the window through it
+        // (/proc/PID/mem) to show the host really can read this VM's memory, and nothing else.
+        info!(
+            "GH-SHIM: window {:#x}+{:#x} shared as {} parcel(s) in {:?} host={:#x}",
+            window.guest_addr.offset(),
+            size,
+            nparcels,
+            started.elapsed(),
+            window.host_addr as u64
+        );
+        mem.write_obj_at_addr(
+            nparcels as u32,
+            ho.checked_add(std::mem::offset_of!(abi::ShimHandoff, nparcels) as u64)
+                .ok_or_else(|| Error::new(EINVAL))?,
+        )
+        .map_err(|_| Error::new(EINVAL))?;
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        // Last, and only now.
+        mem.write_obj_at_addr(
+            1u64,
+            ho.checked_add(std::mem::offset_of!(abi::ShimHandoff, ready) as u64)
+                .ok_or_else(|| Error::new(EINVAL))?,
+        )
+        .map_err(|_| Error::new(EINVAL))?;
+        watch_shim(mem, ho);
+        Ok(())
     }
 
     /// iceland gvm: share a runtime mapping with the protected guest and have it accepted.
@@ -667,6 +829,72 @@ impl GunyahVm {
             Err(vm_memory::Error::MemoryAccess(_, MmapError::SystemCallFailed(e))) => Err(e),
             Err(_) => Err(Error::new(EIO)),
         }
+    }
+}
+
+/// iceland gvm (after DroidVM): report what the boot shim did.
+///
+/// Everything the shim can fail at happens before the guest has a console of its own, so the
+/// handoff page is how it speaks. This thread turns that into GH-SHIM log lines and stops once
+/// the shim jumps to the payload (or gives up, or ten seconds pass).
+#[cfg(target_arch = "aarch64")]
+fn watch_shim(mem: GuestMemory, handoff: GuestAddress) {
+    use crate::gunyah::shim_abi as abi;
+
+    let spawned = std::thread::Builder::new()
+        .name("gh_shim_watch".into())
+        .spawn(move || {
+            let at = |off: usize| handoff.unchecked_add(off as u64);
+            let status_at = at(std::mem::offset_of!(abi::ShimHandoff, status));
+            let error_at = at(std::mem::offset_of!(abi::ShimHandoff, error));
+            let probe_at = at(std::mem::offset_of!(abi::ShimHandoff, exec_probe));
+            let msg_at = at(std::mem::offset_of!(abi::ShimHandoff, msg));
+            let mut last = 0u64;
+            for _ in 0..1000 {
+                let status: u64 = mem.read_obj_from_addr_volatile(status_at).unwrap_or(0);
+                if status != last {
+                    last = status;
+                    match status {
+                        abi::SHIM_STATUS_RUNNING => info!("GH-SHIM: shim is running"),
+                        abi::SHIM_STATUS_ACCEPTED => {
+                            let probe: u64 = mem.read_obj_from_addr(probe_at).unwrap_or(0);
+                            if probe != 0 {
+                                info!(
+                                    "GH-SHIM: window accepted; exec probe returned {} (42 = ok)",
+                                    probe
+                                );
+                            } else {
+                                info!("GH-SHIM: window accepted");
+                            }
+                        }
+                        abi::SHIM_STATUS_DT_DONE => info!("GH-SHIM: /memory now names the window"),
+                        abi::SHIM_STATUS_JUMPING => {
+                            info!("GH-SHIM: handing over to the payload");
+                            return;
+                        }
+                        s if s & abi::SHIM_STATUS_ERROR != 0 => {
+                            let mut msg = [0u8; 256];
+                            let _ = mem.read_exact_at_addr(&mut msg, msg_at);
+                            let end = msg.iter().position(|&c| c == 0).unwrap_or(msg.len());
+                            let err: u64 = mem.read_obj_from_addr(error_at).unwrap_or(0);
+                            error!(
+                                "GH-SHIM: gave up: {} (error {:#x})",
+                                String::from_utf8_lossy(&msg[..end]),
+                                err
+                            );
+                            return;
+                        }
+                        other => info!("GH-SHIM: status {:#x}", other),
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if last == 0 {
+                error!("GH-SHIM: nothing written to the handoff page in ten seconds");
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("GH-SHIM: could not watch the handoff page: {}", e);
     }
 }
 

@@ -637,6 +637,8 @@ impl HallaVm {
                 MemoryRegionPurpose::ReservedMemory => HVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::SharedFramebuffer => HVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::StaticSwiotlbRegion => HVM_USER_MEM_REGION_STATIC_SWIOTLB,
+                MemoryRegionPurpose::SharedGuestRam => HVM_USER_MEM_REGION_GUEST_MEM,
+                MemoryRegionPurpose::ShimHandoff => HVM_USER_MEM_REGION_GUEST_MEM,
             };
             // SAFETY:
             // Safe because the guest regions are guaranteed not to overlap.

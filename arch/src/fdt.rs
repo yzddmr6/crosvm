@@ -204,6 +204,13 @@ pub fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> 
             MemoryRegionPurpose::SharedFramebuffer => true,
             #[cfg(target_arch = "aarch64")]
             MemoryRegionPurpose::StaticSwiotlbRegion => true,
+            // iceland gvm (from DroidVM): a pseudo-unprotected VM's window is not the guest's
+            // RAM until the boot shim has accepted it and pointed /memory at it itself; the
+            // handoff page never is.
+            #[cfg(target_arch = "aarch64")]
+            MemoryRegionPurpose::SharedGuestRam => false,
+            #[cfg(target_arch = "aarch64")]
+            MemoryRegionPurpose::ShimHandoff => false,
         })
         .collect();
     regions.sort_by(|a, b| a.guest_addr.cmp(&b.guest_addr));

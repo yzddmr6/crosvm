@@ -607,6 +607,8 @@ impl GeniezoneVm {
                 MemoryRegionPurpose::ReservedMemory => GZVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::SharedFramebuffer => GZVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::StaticSwiotlbRegion => GZVM_USER_MEM_REGION_STATIC_SWIOTLB,
+                MemoryRegionPurpose::SharedGuestRam => GZVM_USER_MEM_REGION_GUEST_MEM,
+                MemoryRegionPurpose::ShimHandoff => GZVM_USER_MEM_REGION_GUEST_MEM,
             };
             // SAFETY:
             // Safe because the guest regions are guaranteed not to overlap.

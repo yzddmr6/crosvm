@@ -99,6 +99,9 @@ use vm_memory::MemoryRegionPurpose;
 
 mod fdt;
 mod simplefb;
+// iceland gvm (from DroidVM): the boot shim's ABI, the same file the shim itself includes.
+#[path = "../../hypervisor/src/gunyah/shim_abi.rs"]
+mod shim_abi;
 
 const AARCH64_FDT_MAX_SIZE: u64 = 0x200000;
 const AARCH64_FDT_ALIGN: u64 = 0x200000;
@@ -114,6 +117,21 @@ const AARCH64_GIC_CPUI_SIZE: u64 = 0x20000;
 // This indicates the start of DRAM inside the physical address space.
 const AARCH64_PHYS_MEM_START: u64 = 0x80000000;
 const AARCH64_PLATFORM_MMIO_SIZE: u64 = 0x40000000;
+
+/// iceland gvm (pseudo-unprotected mode, from DroidVM): the lent region the VM boots in, holding
+/// the boot shim at its base and the device tree at AARCH64_SHIM_FDT_OFFSET. 4 MiB rather than
+/// 2 MiB because DroidVM measured that the 6.12-generation resource manager wants the tree where
+/// an ordinary VM has it (2 MiB aligned, 2 MiB long). It comes out of `--mem`.
+const AARCH64_SHIM_BOOT_REGION_SIZE: u64 = AARCH64_FDT_ALIGN + AARCH64_FDT_MAX_SIZE;
+const AARCH64_SHIM_FDT_OFFSET: u64 = AARCH64_FDT_ALIGN;
+const AARCH64_SHIM_FDT_MAX_SIZE: u64 = AARCH64_FDT_MAX_SIZE;
+/// The page host and shim talk through: one 2 MiB folio above the boot region, shared.
+const AARCH64_SHIM_HANDOFF_SIZE: u64 = 0x200000;
+/// The least guest RAM the window may be.
+const AARCH64_SHIM_MIN_WINDOW: u64 = 64 << 20;
+
+/// The boot shim (droidvm-shim, built by build-shim-par-in.sh), compiled in so it cannot be stale.
+const SHIM_IMAGE: &[u8] = include_bytes!("../../hypervisor/src/gunyah/shim.bin");
 
 const AARCH64_PROTECTED_VM_FW_MAX_SIZE: u64 = 0x400000;
 const AARCH64_PROTECTED_VM_FW_START: u64 =
@@ -350,6 +368,11 @@ pub enum Error {
     NestedVirtRequiresGicV3,
     #[error("ARM nested virtualization requested, but not supported by the host")]
     NestedVirtUnsupported,
+    #[error(
+        "--mem {0:#x} leaves no room for the guest's RAM: a pseudo-unprotected VM spends the \
+         bottom of it on the boot shim, the device tree and the handoff page"
+    )]
+    PseudoUnprotectedTooSmall(u64),
     #[error("pVM firmware could not be loaded: {0}")]
     PvmFwLoadFailure(base::Error),
     #[error("ramoops address is different from high_mmio_base: {0} vs {1}")]
@@ -378,6 +401,10 @@ pub enum Error {
     SetReg(base::Error),
     #[error("failed to set up guest memory: {0}")]
     SetupGuestMemory(GuestMemoryError),
+    #[error("the compiled-in boot shim does not start with the header magic ({0:#x})")]
+    ShimBadImage(u64),
+    #[error("boot shim could not be written to guest memory: {0}")]
+    ShimLoadFailure(GuestMemoryError),
     #[error("--simplefb does not fit: {0}")]
     SimplefbLayout(String),
     #[error("this function isn't supported")]
@@ -428,6 +455,77 @@ fn get_block_size() -> u64 {
     let block_size = page_size * ptes_per_page;
 
     block_size as u64
+}
+
+/// iceland gvm (from DroidVM): copy the boot shim to the base of the boot region and patch its
+/// header with the two addresses only the host knows. The region is lent right after this.
+fn load_shim(
+    mem: &GuestMemory,
+    at: GuestAddress,
+    payload: GuestAddress,
+    handoff: GuestAddress,
+    probe_exec: bool,
+) -> std::result::Result<(), Error> {
+    use shim_abi as abi;
+
+    let built_magic = SHIM_IMAGE
+        .get(abi::SHIM_HEADER_OFFSET..abi::SHIM_HEADER_OFFSET + 8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        .unwrap_or(0);
+    if built_magic != abi::SHIM_HEADER_MAGIC {
+        return Err(Error::ShimBadImage(built_magic));
+    }
+    mem.write_all_at_addr(SHIM_IMAGE, at)
+        .map_err(Error::ShimLoadFailure)?;
+    let mut flags = 0u32;
+    if probe_exec {
+        flags |= abi::SHIM_FLAG_PROBE_EXEC;
+    }
+    let header = abi::ShimHeader {
+        magic: abi::SHIM_HEADER_MAGIC,
+        version: abi::SHIM_ABI_VERSION,
+        flags,
+        payload: payload.offset(),
+        handoff: handoff.offset(),
+        dtb_max_size: AARCH64_SHIM_FDT_MAX_SIZE,
+        reserved: [0; 3],
+    };
+    // SAFETY: ShimHeader is repr(C) and made only of integers: no padding, no invalid pattern.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            &header as *const abi::ShimHeader as *const u8,
+            std::mem::size_of::<abi::ShimHeader>(),
+        )
+    };
+    mem.write_all_at_addr(
+        bytes,
+        at.unchecked_add(abi::SHIM_HEADER_OFFSET as u64),
+    )
+    .map_err(Error::ShimLoadFailure)?;
+    base::info!(
+        "GH-SHIM: {} bytes at {:#x}; payload {:#x}, handoff {:#x}, flags {:#x}",
+        SHIM_IMAGE.len(),
+        at.offset(),
+        payload.offset(),
+        handoff.offset(),
+        flags
+    );
+    Ok(())
+}
+
+/// Put the handoff page into the state the shim expects (magic and version; `ready` stays 0
+/// until the host has shared the window after GH_VM_START).
+fn init_handoff(mem: &GuestMemory, at: GuestAddress) -> std::result::Result<(), Error> {
+    let handoff = shim_abi::ShimHandoff::default();
+    // SAFETY: repr(C), integers and a byte array; no padding, no invalid pattern.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            &handoff as *const shim_abi::ShimHandoff as *const u8,
+            std::mem::size_of::<shim_abi::ShimHandoff>(),
+        )
+    };
+    mem.write_all_at_addr(bytes, at)
+        .map_err(Error::ShimLoadFailure)
 }
 
 fn get_vcpu_mpidr_aff(vcpus: &[Arc<dyn VcpuAArch64>], index: usize) -> Option<u64> {
@@ -560,11 +658,44 @@ impl arch::LinuxArch for AArch64 {
         }
         let main_memory_size = main_memory_size(components, hypervisor);
 
-        let mut memory_regions = vec![(
-            GuestAddress(AARCH64_PHYS_MEM_START),
-            main_memory_size,
-            MemoryRegionOptions::new().align(get_block_size()),
-        )];
+        // iceland gvm (pseudo-unprotected mode, from DroidVM): only a small boot region (shim +
+        // device tree) is lent; the handoff page above it is shared at creation; everything
+        // above that is the window the host shares after GH_VM_START and the shim accepts.
+        let mut memory_regions = if components.hv_cfg.protection_type.shares_guest_ram() {
+            let boot = AARCH64_SHIM_BOOT_REGION_SIZE;
+            let handoff = AARCH64_SHIM_HANDOFF_SIZE;
+            let window = main_memory_size
+                .checked_sub(boot + handoff)
+                .filter(|w| *w >= AARCH64_SHIM_MIN_WINDOW)
+                .ok_or(Error::PseudoUnprotectedTooSmall(components.memory_size))?;
+            vec![
+                (
+                    GuestAddress(AARCH64_PHYS_MEM_START),
+                    boot,
+                    MemoryRegionOptions::new().align(get_block_size()),
+                ),
+                (
+                    GuestAddress(AARCH64_PHYS_MEM_START + boot),
+                    handoff,
+                    MemoryRegionOptions::new()
+                        .purpose(MemoryRegionPurpose::ShimHandoff)
+                        .align(2 << 20),
+                ),
+                (
+                    GuestAddress(AARCH64_PHYS_MEM_START + boot + handoff),
+                    window,
+                    MemoryRegionOptions::new()
+                        .purpose(MemoryRegionPurpose::SharedGuestRam)
+                        .align(2 << 20),
+                ),
+            ]
+        } else {
+            vec![(
+                GuestAddress(AARCH64_PHYS_MEM_START),
+                main_memory_size,
+                MemoryRegionOptions::new().align(get_block_size()),
+            )]
+        };
 
         // Allocate memory for the pVM firmware.
         if components.hv_cfg.protection_type.runs_firmware() {
@@ -675,12 +806,34 @@ impl arch::LinuxArch for AArch64 {
             .map_err(Error::PvmFwLoadFailure)?;
         }
 
+        // iceland gvm (pseudo-unprotected mode): the payload goes to the bottom of the window,
+        // the device tree stays in the lent boot region after the shim (the resource manager
+        // finds the guest's image through the parcel holding the tree).
+        let shares_guest_ram = components.hv_cfg.protection_type.shares_guest_ram();
+        let window_start = mem
+            .regions()
+            .find(|r| r.options.purpose == MemoryRegionPurpose::SharedGuestRam)
+            .map(|r| r.guest_addr);
+        let handoff_addr = mem
+            .regions()
+            .find(|r| r.options.purpose == MemoryRegionPurpose::ShimHandoff)
+            .map(|r| r.guest_addr);
+        if shares_guest_ram && (window_start.is_none() || handoff_addr.is_none()) {
+            return Err(Error::PseudoUnprotectedTooSmall(components.memory_size));
+        }
+
         let fdt_position = fdt_position.unwrap_or(if has_bios {
             FdtPosition::Start
         } else {
             FdtPosition::End
         });
+        let fdt_position = if shares_guest_ram {
+            FdtPosition::Start
+        } else {
+            fdt_position
+        };
         let payload_address = match fdt_position {
+            FdtPosition::Start if shares_guest_ram => window_start.unwrap(),
             // If FDT is at the start RAM, the payload needs to go somewhere after it.
             FdtPosition::Start => GuestAddress(AARCH64_PHYS_MEM_START + AARCH64_FDT_MAX_SIZE),
             // Otherwise, put the payload at the start of RAM.
@@ -735,6 +888,9 @@ impl arch::LinuxArch for AArch64 {
         let memory_end = GuestAddress(AARCH64_PHYS_MEM_START + main_memory_size);
 
         let fdt_address = match fdt_position {
+            FdtPosition::Start if shares_guest_ram => {
+                GuestAddress(AARCH64_PHYS_MEM_START + AARCH64_SHIM_FDT_OFFSET)
+            }
             FdtPosition::Start => GuestAddress(AARCH64_PHYS_MEM_START),
             FdtPosition::End => {
                 let addr = memory_end
@@ -1151,8 +1307,13 @@ impl arch::LinuxArch for AArch64 {
             })
         });
 
+        let fdt_max_size = if shares_guest_ram {
+            AARCH64_SHIM_FDT_MAX_SIZE
+        } else {
+            AARCH64_FDT_MAX_SIZE
+        };
         fdt::create_fdt(
-            AARCH64_FDT_MAX_SIZE as usize,
+            fdt_max_size as usize,
             &mem,
             pci_irqs,
             pci_cfg,
@@ -1191,12 +1352,27 @@ impl arch::LinuxArch for AArch64 {
         )
         .map_err(Error::CreateFdt)?;
 
-        vm.init_arch(
-            payload.entry(),
-            fdt_address,
-            AARCH64_FDT_MAX_SIZE.try_into().unwrap(),
-        )
-        .map_err(Error::InitVmError)?;
+        // iceland gvm (pseudo-unprotected mode): the hypervisor starts the shim at the base of the
+        // boot region; the shim accepts the window and jumps to the payload with x0 = the tree.
+        let entry = if shares_guest_ram {
+            let handoff_addr = handoff_addr.unwrap();
+            load_shim(
+                &mem,
+                GuestAddress(AARCH64_PHYS_MEM_START),
+                payload.entry(),
+                handoff_addr,
+                // ICELAND_SHIM_PROBE_EXEC (diagnostic): the shim executes two instructions out
+                // of the window before handing over and reports the result.
+                std::env::var_os("ICELAND_SHIM_PROBE_EXEC").is_some_and(|v| v != "0"),
+            )?;
+            init_handoff(&mem, handoff_addr)?;
+            GuestAddress(AARCH64_PHYS_MEM_START)
+        } else {
+            payload.entry()
+        };
+
+        vm.init_arch(entry, fdt_address, fdt_max_size.try_into().unwrap())
+            .map_err(Error::InitVmError)?;
 
         let vm_request_tubes = vec![vmwdt_host_tube, vcpufreq_host_tube];
 

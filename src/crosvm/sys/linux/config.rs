@@ -49,7 +49,19 @@ pub fn check_serial_params(_serial_params: &SerialParameters) -> Result<(), Stri
     Ok(())
 }
 
-pub fn validate_config(_cfg: &mut Config) -> std::result::Result<(), String> {
+pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
+    // iceland gvm: the pseudo-unprotected mode exists only for Gunyah.
+    if cfg.protection_type == hypervisor::ProtectionType::ProtectedPseudoUnprotected {
+        #[cfg(all(target_arch = "aarch64", feature = "gunyah"))]
+        let supported = matches!(cfg.hypervisor, Some(HypervisorKind::Gunyah { .. }));
+        #[cfg(not(all(target_arch = "aarch64", feature = "gunyah")))]
+        let supported = false;
+        if !supported {
+            return Err(
+                "--protected-vm-pseudo-unprotected requires --hypervisor gunyah".to_string(),
+            );
+        }
+    }
     Ok(())
 }
 

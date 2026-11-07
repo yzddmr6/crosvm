@@ -11,6 +11,10 @@ pub mod caps;
 pub mod geniezone;
 #[cfg(all(unix, target_arch = "aarch64", feature = "gunyah"))]
 pub mod gunyah;
+/// The boot shim's ABI (iceland gvm, from DroidVM), re-exported so the arch code that loads the
+/// shim and the shim itself cannot disagree about it.
+#[cfg(all(unix, target_arch = "aarch64", feature = "gunyah"))]
+pub use crate::gunyah::shim_abi as gunyah_shim_abi;
 #[cfg(target_arch = "aarch64")]
 #[cfg(all(unix, target_arch = "aarch64", feature = "halla"))]
 pub mod halla;
@@ -673,6 +677,12 @@ pub enum ProtectionType {
     /// mode, protected VM firmware loaded, and simulating protected mode as much as possible.
     /// This is useful for debugging the protected VM firmware and other protected mode issues.
     UnprotectedWithFirmware,
+    /// iceland gvm (from DroidVM): a Gunyah protected VM whose RAM is SHARED to it at run time
+    /// instead of lent before boot. Only a small boot region (a shim and the device tree) is
+    /// lent; the shim accepts the shared window and then starts the payload. The host can read
+    /// and write all of the guest's RAM: this is an opt-in mode for guests that need it (no
+    /// bounce buffers, zero-copy device access), not a protected VM.
+    ProtectedPseudoUnprotected,
 }
 
 impl ProtectionType {
@@ -680,8 +690,18 @@ impl ProtectionType {
     pub fn isolates_memory(&self) -> bool {
         matches!(
             self,
-            Self::Protected | Self::ProtectedWithCustomFirmware | Self::ProtectedWithoutFirmware
+            Self::Protected
+                | Self::ProtectedWithCustomFirmware
+                | Self::ProtectedWithoutFirmware
+                // The boot region really is lent, and runtime mappings still need GuestAccept.
+                | Self::ProtectedPseudoUnprotected
         )
+    }
+
+    /// Returns whether the guest's RAM is a window shared at run time and accepted by the boot
+    /// shim, rather than memory lent to the guest before boot.
+    pub fn shares_guest_ram(&self) -> bool {
+        matches!(self, Self::ProtectedPseudoUnprotected)
     }
 
     /// Returns whether the VMM needs to load the pVM firmware.
