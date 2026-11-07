@@ -18,6 +18,77 @@ use vm_memory::GuestMemory;
 use crate::virtio::descriptor_utils::Reader;
 use crate::virtio::descriptor_utils::Writer;
 
+/// iceland gvm: DMA guard for protected Gunyah VMs. When the guest memory has a static swiotlb region, a device
+/// may only touch the swiotlb and the shared framebuffer: everything else is lent to the guest, and a host access
+/// to lent memory is a SIGBUS (crosvm) or, from the kernel (tap / disk I/O on such a buffer), can stall the host
+/// (vm-run v10b / v10c with a Windows guest). A descriptor outside those regions makes the chain invalid instead
+/// (logged as GVM-DMA-GUARD with the device thread); CROSVM_GVM_DMA_GUARD=0 turns the check off.
+mod gvm_dma_guard {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::sync::OnceLock;
+
+    use base::warn;
+    use vm_memory::GuestMemory;
+    use vm_memory::MemoryRegionPurpose;
+
+    static ALLOWED: OnceLock<Option<Vec<(u64, u64)>>> = OnceLock::new();
+    static HITS: AtomicU64 = AtomicU64::new(0);
+
+    fn allowed(mem: &GuestMemory) -> &'static Option<Vec<(u64, u64)>> {
+        ALLOWED.get_or_init(|| {
+            if std::env::var("CROSVM_GVM_DMA_GUARD").is_ok_and(|v| v == "0") {
+                return None;
+            }
+            let mut v = Vec::new();
+            let mut swiotlb = false;
+            for r in mem.regions() {
+                #[allow(unreachable_patterns)]
+                match r.options.purpose {
+                    #[cfg(target_arch = "aarch64")]
+                    MemoryRegionPurpose::StaticSwiotlbRegion => {
+                        swiotlb = true;
+                        v.push((r.guest_addr.offset(), r.guest_addr.offset() + r.size as u64));
+                    }
+                    #[cfg(target_arch = "aarch64")]
+                    MemoryRegionPurpose::SharedFramebuffer => {
+                        v.push((r.guest_addr.offset(), r.guest_addr.offset() + r.size as u64));
+                    }
+                    _ => {}
+                }
+            }
+            if swiotlb {
+                warn!("GVM-DMA-GUARD on: devices limited to {:x?}", v);
+                Some(v)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// true when [addr, addr + len) may be accessed by a device
+    pub fn check(mem: &GuestMemory, addr: u64, len: u64) -> bool {
+        let Some(ranges) = allowed(mem) else {
+            return true;
+        };
+        let end = addr.saturating_add(len);
+        if ranges.iter().any(|&(s, e)| addr >= s && end <= e) {
+            return true;
+        }
+        let n = HITS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 20 || n.is_power_of_two() {
+            warn!(
+                "GVM-DMA-GUARD #{} thread {} descriptor addr={:#x} len={:#x} outside the swiotlb / shared regions: chain refused",
+                n,
+                std::thread::current().name().unwrap_or("?"),
+                addr,
+                len
+            );
+        }
+        false
+    }
+}
+
 /// Virtio flag indicating there is a next descriptor in descriptor chain
 pub const VIRTQ_DESC_F_NEXT: u16 = 0x1;
 /// Virtio flag indicating descriptor is write-only
@@ -158,6 +229,14 @@ impl DescriptorChain {
             if !mem.is_valid_range(GuestAddress(r.offset), len.into()) {
                 bail!(
                     "descriptor address range out of bounds: addr={:#x} len={:#x}",
+                    r.offset,
+                    r.len
+                );
+            }
+
+            if !gvm_dma_guard::check(mem, r.offset, len.into()) {
+                bail!(
+                    "descriptor address range in memory lent to the protected guest: addr={:#x} len={:#x}",
                     r.offset,
                     r.len
                 );
