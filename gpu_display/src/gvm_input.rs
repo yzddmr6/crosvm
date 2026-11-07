@@ -241,9 +241,13 @@ impl Mapper {
             self.scrolled = true;
             // natural scrolling: the content follows the fingers (fingers up = scroll down = negative wheel)
             return match self.mode {
+                // p3: horizontal two-finger scroll goes to the tablet device's REL_HWHEEL (the virtio mouse has
+                // no horizontal wheel); one axis per report, vertical first
                 Mode::Touchpad => {
                     if sv != 0 {
                         vec![Out::RelWheel { v: sv }]
+                    } else if sh != 0 {
+                        vec![Out::AbsWheel { v: 0, h: -sh }]
                     } else {
                         vec![]
                     }
@@ -408,6 +412,16 @@ mod tests {
         assert_eq!(m.pointer_move(5, 5), vec![]);
         assert!(matches!(m.pointer_button(BTN_LEFT, true, 5, 5)[0], Out::MtDown { .. }));
         assert_eq!(m.pointer_button(BTN_RIGHT, true, 5, 5), vec![]);
+    }
+
+    #[test]
+    fn touchpad_horizontal_scroll_uses_the_tablet_hwheel() {
+        let mut m = Mapper::new(Mode::Touchpad);
+        m.finger_down(1, 100, 300, 0);
+        m.finger_down(2, 100, 400, 10);
+        // each finger's 80 px moves the centroid 40 px = one notch (natural: fingers right = content right)
+        assert_eq!(m.finger_motion(1, 180, 300, 20), vec![Out::AbsWheel { v: 0, h: -1 }]);
+        assert_eq!(m.finger_motion(2, 180, 400, 30), vec![Out::AbsWheel { v: 0, h: -1 }]);
     }
 
     #[test]

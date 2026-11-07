@@ -832,8 +832,18 @@ static void toplevel_configure(void *data,
 	fprintf(stderr, "GVM-CONFIGURE %dx%d fullscreen=%d viewport=%d\n", width, height, fullscreen,
 		surface && surface->viewport ? 1 : 0);
 	fflush(stderr);
-	if (!surface || !surface->viewport)
+	if (!surface)
 		return;
+	/* p3: the first configure arrives in the creation roundtrip, before the viewport exists; it already
+	 * carries the fullscreen size. Keep it: dwl_context_surface_new applies it to the new viewport, so the
+	 * window does not first map at its windowed size (KWin then answered with an 800x500 configure). */
+	if (!surface->viewport) {
+		if (fullscreen && width > 0 && height > 0) {
+			surface->fs_width = width;
+			surface->fs_height = height;
+		}
+		return;
+	}
 	if (fullscreen && width > 0 && height > 0) {
 		if (surface->fs_width != width || surface->fs_height != height) {
 			surface->fs_width = width;
@@ -1391,6 +1401,14 @@ struct dwl_surface *dwl_context_surface_new(struct dwl_context *self,
 		if (!disp_surface->viewport) {
 			self->error_callback("failed to make surface viewport");
 			goto fail;
+		}
+		/* iceland gvm (p3): a fullscreen size from the creation roundtrip applies from the first commit */
+		if (disp_surface->fs_width > 0 && disp_surface->fs_height > 0) {
+			wp_viewport_set_destination(disp_surface->viewport, disp_surface->fs_width,
+						    disp_surface->fs_height);
+			fprintf(stderr, "GVM-FULLSCREEN on %dx%d (buffer %ux%u, at creation)\n", disp_surface->fs_width,
+				disp_surface->fs_height, disp_surface->width, disp_surface->height);
+			fflush(stderr);
 		}
 	}
 
