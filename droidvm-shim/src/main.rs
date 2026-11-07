@@ -223,13 +223,26 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
         //
         // SAFETY: the hypervisor handed us this pointer, and the header it starts with says how
         // long it is; every access past this point is bounds-checked against that length.
+        //
+        // iceland gvm (p6): the resource manager adds its own nodes (the /hypervisor one with the
+        // message queues among them) through a cacheable mapping, and this code runs with the MMU
+        // off, so its loads bypass the caches: without cleaning the tree's lines to the point of
+        // coherency first, the shim reads the tree as crosvm wrote it, before the RM touched it
+        // (p6: "no gunyah-resource-manager node", while Linux, reading cacheably, finds it).
+        cache_flush(dtb as u64, 64);
         let blob = unsafe {
             let len = match fdt_total_size(dtb) {
                 Some(l) => l,
                 None => die(0, "the device tree pointer is not a device tree"),
             };
+            cache_flush(dtb as u64, len);
             core::slice::from_raw_parts_mut(dtb, len)
         };
+        uart_str("SHIM: device tree ");
+        uart_hex(dtb as u64);
+        uart_str("+");
+        uart_hex(blob.len() as u64);
+        uart_str("\r\n");
         let mut tree = match fdt::Fdt::new(blob) {
             Ok(t) => t,
             Err(_) => die(0, "the device tree header did not parse"),
@@ -239,7 +252,18 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
             "reg",
         ) {
             Ok(hit) => hit,
-            Err(_) => die(0, "no gunyah-resource-manager node in the device tree"),
+            Err(e) => {
+                // What the tree does have at the top, for the next diagnosis.
+                uart_str("SHIM: root nodes:");
+                tree.for_each_root_child(|name| {
+                    uart_str(" ");
+                    for &b in name.iter().take(40) {
+                        uart(b);
+                    }
+                });
+                uart_str("\r\n");
+                die(e.code(), "no gunyah-resource-manager node in the device tree")
+            }
         };
         if len < 16 {
             die(len as u64, "the resource manager node's reg is too short")
@@ -324,6 +348,8 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
             if tree.set_memory_window(h.parcel[0].base, total).is_err() {
                 die(0, "could not point /memory at the window")
             }
+            // The tree was written with the MMU off; leave no stale line for Linux to read.
+            cache_flush(dtb as u64, tree.len());
             h.status = SHIM_STATUS_DT_DONE;
             uart_str("SHIM: /memory now ");
             uart_hex(h.parcel[0].base);

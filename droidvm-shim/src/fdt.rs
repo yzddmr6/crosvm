@@ -38,6 +38,19 @@ pub enum Error {
     NotFound,
 }
 
+impl Error {
+    /// A number for the handoff page / console (iceland gvm diagnostics).
+    pub fn code(&self) -> u64 {
+        match self {
+            Error::BadMagic => 1,
+            Error::Truncated => 2,
+            Error::BadTag => 3,
+            Error::TooDeep => 4,
+            Error::NotFound => 5,
+        }
+    }
+}
+
 /// What to look for: a node by the name of a direct child of the root, or by a string in some
 /// node's `compatible` list at any depth.
 #[derive(Clone, Copy)]
@@ -190,6 +203,44 @@ impl<'a> Fdt<'a> {
             }
         }
         Err(Error::NotFound)
+    }
+
+    /// The blob's length.
+    pub fn len(&self) -> usize {
+        self.blob.len()
+    }
+
+    /// Calls `f` with the name of every direct child of the root (iceland gvm diagnostics).
+    pub fn for_each_root_child(&self, mut f: impl FnMut(&[u8])) {
+        let mut depth = 0usize;
+        let mut p = self.struct_off;
+        let end = self.struct_off + self.struct_len;
+        while p < end {
+            let Ok(tag) = be32(self.blob, p) else { return };
+            p += 4;
+            match tag {
+                FDT_BEGIN_NODE => {
+                    let Ok(name) = cstr(self.blob, p) else { return };
+                    p += (name.len() + 4) & !3;
+                    if depth == 1 {
+                        f(name);
+                    }
+                    depth += 1;
+                }
+                FDT_END_NODE => {
+                    if depth == 0 {
+                        return;
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let Ok(len) = be32(self.blob, p) else { return };
+                    p += 8 + ((len as usize + 3) & !3);
+                }
+                FDT_NOP => {}
+                _ => return,
+            }
+        }
     }
 
     pub fn prop_bytes(&self, at: usize, len: usize) -> Result<&[u8], Error> {
