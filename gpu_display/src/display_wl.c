@@ -26,6 +26,7 @@
 #include "xdg-shell.h"
 #include "virtio-gpu-metadata-v1.h"
 #include "xdg-decoration-unstable-v1.h"
+#include "keyboard-shortcuts-inhibit-unstable-v1.h"
 #include <wayland-client-core.h>
 #include <wayland-client-protocol.h>
 #include <wayland-client.h>
@@ -81,6 +82,8 @@ struct interfaces {
 	struct wp_viewporter *viewporter; // optional
 	struct wp_virtio_gpu_metadata_v1 *virtio_gpu_metadata; // optional
 	struct zxdg_decoration_manager_v1 *decoration_manager; /* iceland gvm: KWin server-side frame */
+	/* iceland gvm (kbd grab): compositor shortcuts go to the VM while its window has the keyboard */
+	struct zwp_keyboard_shortcuts_inhibit_manager_v1 *kbd_inhibit_manager;
 };
 
 struct output {
@@ -145,6 +148,7 @@ struct dwl_surface {
 	struct xdg_surface *xdg_surface;
 	struct xdg_toplevel *xdg_toplevel;
 	struct zxdg_toplevel_decoration_v1 *decoration;
+	struct zwp_keyboard_shortcuts_inhibitor_v1 *kbd_inhibitor; /* iceland gvm (kbd grab) */
 	struct wp_viewport *viewport;
 	struct wp_virtio_gpu_surface_metadata_v1 *virtio_gpu_surface_metadata;
 	struct wl_subsurface *subsurface;
@@ -736,6 +740,27 @@ static void dwl_context_output_get_aura(struct dwl_context *context)
 	}
 }
 
+/* iceland gvm (kbd grab): the compositor tells whether the inhibitor is in force (it may ask the user first, or
+ * the user may cancel it with the compositor's escape shortcut); logged for the kit rows */
+static void kbd_inhibitor_active(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor)
+{
+	(void)data;
+	(void)inhibitor;
+	fprintf(stderr, "GVM-KBD-GRAB active\n");
+}
+
+static void kbd_inhibitor_inactive(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor)
+{
+	(void)data;
+	(void)inhibitor;
+	fprintf(stderr, "GVM-KBD-GRAB inactive\n");
+}
+
+static const struct zwp_keyboard_shortcuts_inhibitor_v1_listener kbd_inhibitor_listener = {
+	.active = kbd_inhibitor_active,
+	.inactive = kbd_inhibitor_inactive,
+};
+
 static void registry_global(void *data, struct wl_registry *registry,
 			    uint32_t id, const char *interface,
 			    uint32_t version)
@@ -781,6 +806,10 @@ static void registry_global(void *data, struct wl_registry *registry,
 		 * Mutter does not offer this global, so GNOME is unchanged. */
 		ifaces->decoration_manager = (struct zxdg_decoration_manager_v1 *)wl_registry_bind(
 		    registry, id, &zxdg_decoration_manager_v1_interface, 1);
+	} else if (strcmp(interface, zwp_keyboard_shortcuts_inhibit_manager_v1_interface.name) == 0) {
+		/* iceland gvm (kbd grab): KWin and Mutter offer it; bound always, used with CROSVM_GVM_KBD_GRAB=1 */
+		ifaces->kbd_inhibit_manager = (struct zwp_keyboard_shortcuts_inhibit_manager_v1 *)wl_registry_bind(
+		    registry, id, &zwp_keyboard_shortcuts_inhibit_manager_v1_interface, 1);
 	} else if (strcmp(interface, "wp_virtio_gpu_metadata_v1") == 0) {
 		ifaces->virtio_gpu_metadata =
 			(struct wp_virtio_gpu_metadata_v1 *)wl_registry_bind(
@@ -1335,6 +1364,23 @@ struct dwl_surface *dwl_context_surface_new(struct dwl_context *self,
 		xdg_surface_add_listener(disp_surface->xdg_surface,
 					     &xdg_surface_listener,
 					     disp_surface);
+		/* iceland gvm (kbd grab): CROSVM_GVM_KBD_GRAB=1 asks the compositor to send its own shortcuts
+		 * (Super, Alt+Tab, ...) to the VM while this window has the keyboard focus */
+		const char *kg = getenv("CROSVM_GVM_KBD_GRAB");
+		if (kg && *kg && strcmp(kg, "0") != 0) {
+			if (self->ifaces.kbd_inhibit_manager && self->ifaces.seat) {
+				disp_surface->kbd_inhibitor =
+				    zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts(
+					self->ifaces.kbd_inhibit_manager, disp_surface->wl_surface,
+					self->ifaces.seat);
+				if (disp_surface->kbd_inhibitor)
+					zwp_keyboard_shortcuts_inhibitor_v1_add_listener(
+					    disp_surface->kbd_inhibitor, &kbd_inhibitor_listener, disp_surface);
+				fprintf(stderr, "GVM-KBD-GRAB requested\n");
+			} else {
+				fprintf(stderr, "GVM-KBD-GRAB unavailable (no keyboard-shortcuts-inhibit in this compositor)\n");
+			}
+		}
 		/* iceland gvm (0.2-6): CROSVM_GVM_FULLSCREEN=1 opens the window fullscreen, on the output named
 		 * or numbered (0-based, binding order) by CROSVM_GVM_OUTPUT; unknown or unset = the compositor's choice */
 		const char *fs = getenv("CROSVM_GVM_FULLSCREEN");
@@ -1492,6 +1538,8 @@ void dwl_surface_destroy(struct dwl_surface **self)
 		wp_viewport_destroy((*self)->viewport);
 	if ((*self)->subsurface)
 		wl_subsurface_destroy((*self)->subsurface);
+	if ((*self)->kbd_inhibitor)
+		zwp_keyboard_shortcuts_inhibitor_v1_destroy((*self)->kbd_inhibitor);
 	if ((*self)->decoration)
 		zxdg_toplevel_decoration_v1_destroy((*self)->decoration);
 	if ((*self)->xdg_toplevel)

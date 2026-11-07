@@ -95,6 +95,7 @@ fn build_wayland() {
         "viewporter",
         "virtio-gpu-metadata-v1",
         "xdg-decoration-unstable-v1",
+        "keyboard-shortcuts-inhibit-unstable-v1",
     ] {
         build.file(compile_protocol(protocol, &out_dir));
     }
