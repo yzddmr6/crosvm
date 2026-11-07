@@ -435,7 +435,11 @@ impl VirtioGpuScanout {
         let mut display = display.borrow_mut();
 
         // Prevent overwriting a buffer that is currently being used by the compositor.
+        // iceland gvm: remember the dropped frame; the worker's retry timer presents it once a buffer is
+        // free (vm-run v10b: the last frame of a burst was dropped and an idle guest never flushed again,
+        // so the window kept an old, often black, frame).
         if display.next_buffer_in_use(surface_id) {
+            super::gvm_scanout::dropped(resource.resource_id);
             return Ok(OkNoData);
         }
 
@@ -460,6 +464,7 @@ impl VirtioGpuScanout {
         );
 
         display.flip(surface_id);
+        super::gvm_scanout::presented(resource.resource_id);
         Ok(OkNoData)
     }
 
@@ -822,10 +827,15 @@ impl VirtioGpu {
 
     /// iceland gvm: flush every resource that is currently on a scanout once more (refresh timer).
     pub fn gvm_refresh_scanouts(&mut self) {
+        // CROSVM_GVM_REFRESH_MS set: re-present every scanout; otherwise only a frame the copy path had to
+        // drop (compositor still held the next buffer)
+        let all = super::gvm_scanout::refresh_all();
+        let pending = super::gvm_scanout::take_dropped();
         let ids: Vec<u32> = self
             .scanouts
             .values()
             .filter_map(|s| s.resource_id.map(|r| r.get()))
+            .filter(|&r| all || pending == Some(r))
             .collect();
         for id in ids {
             let _ = self.flush_resource(id);

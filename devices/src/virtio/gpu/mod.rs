@@ -1222,10 +1222,14 @@ impl Worker {
         // iceland gvm: CROSVM_GVM_REFRESH_MS=N re-presents the scanouts every N ms even without a guest flush.
         // vm-run v5 (q90r): continuously rendering GL clients (kmscube) were drawn, idle GL compositors (glamor,
         // weston-GL) black although the guest drew; a late re-read catches content that completed after the flush.
-        let gvm_refresh_ms = std::env::var("CROSVM_GVM_REFRESH_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|&ms| ms > 0);
+        // Without it, a 30 ms timer retries frames the copy path deferred (GVM-DROP; vm-run v10b).
+        let gvm_refresh_ms = Some(
+            std::env::var("CROSVM_GVM_REFRESH_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|&ms| ms > 0)
+                .unwrap_or(30),
+        );
         let mut gvm_refresh_timer: Option<Timer> = None;
         let gvm_refresh_desc: SafeDescriptor;
         if let Some(ms) = gvm_refresh_ms {
@@ -1237,7 +1241,7 @@ impl Worker {
             event_manager
                 .add(&gvm_refresh_desc, WorkerToken::GvmRefresh)
                 .context("failed adding the gvm refresh timer")?;
-            warn!("GVM-REFRESH every {} ms", ms.max(16));
+            warn!("GVM-REFRESH every {} ms ({})", ms.max(16), if gvm_scanout::refresh_all() { "all scanouts" } else { "deferred frames only" });
             gvm_refresh_timer = Some(t);
         }
 

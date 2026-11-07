@@ -26,6 +26,8 @@ use base::syslog::LogArgs;
 use base::syslog::LogConfig;
 use cmdline::RunCommand;
 mod crosvm;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+mod gvm_sigbus;
 use crosvm::cmdline;
 use crosvm::config::Config;
 use device_virtio_block::run_block_device;
@@ -913,6 +915,8 @@ fn crosvm_main<I: IntoIterator<Item = String>>(args: I) -> Result<CommandStatus>
 
 fn main() {
     syslog::early_init();
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    gvm_sigbus::install(); // iceland gvm: report SIGBUS / SIGSEGV (thread, address, mappings)
     debug!("crosvm started.");
     let res = crosvm_main(std::env::args());
 

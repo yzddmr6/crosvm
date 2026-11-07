@@ -89,6 +89,43 @@ pub fn trace(text: std::fmt::Arguments) {
     }
 }
 
+static DROPPED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The copy path skipped a flush because the compositor still held the next buffer.
+pub fn dropped(resource_id: u32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    DROPPED.store(resource_id, Relaxed);
+    let n = DROPS.fetch_add(1, Relaxed) + 1;
+    if n.is_power_of_two() {
+        warn!("GVM-DROP {} flushes deferred (compositor held the next buffer), last res={}", n, resource_id);
+    }
+}
+
+/// A frame of this resource reached the window: nothing pending for it any more.
+pub fn presented(resource_id: u32) {
+    let _ = DROPPED.compare_exchange(
+        resource_id,
+        0,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The resource of a deferred frame, if any (cleared; a new drop sets it again).
+pub fn take_dropped() -> Option<u32> {
+    match DROPPED.swap(0, std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        r => Some(r),
+    }
+}
+
+/// CROSVM_GVM_REFRESH_MS set: the refresh timer re-presents every scanout (else it only retries drops).
+pub fn refresh_all() -> bool {
+    static ALL: OnceLock<bool> = OnceLock::new();
+    *ALL.get_or_init(|| std::env::var("CROSVM_GVM_REFRESH_MS").is_ok_and(|v| v.parse::<u64>().is_ok_and(|n| n > 0)))
+}
+
 /// One warn line per event kind and resource (at most 64 lines): which resources the guest flushes and
 /// which one a scanout shows.
 pub fn note(kind: &str, resource_id: u32, text: &str) {
