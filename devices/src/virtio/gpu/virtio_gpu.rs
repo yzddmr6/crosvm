@@ -857,6 +857,11 @@ impl VirtioGpu {
         };
 
         let mut shown = false;
+        super::gvm_scanout::trace(format_args!(
+            "flush res={} on-scanout={}",
+            resource_id.map_or(0, |r| r.get()),
+            self.scanouts.values().any(|s| s.resource_id == resource_id)
+        ));
         for scanout in self.scanouts.values_mut() {
             if scanout.resource_id == resource_id {
                 shown = true;
@@ -1461,6 +1466,12 @@ impl VirtioGpu {
             .ok_or(ErrInvalidResourceId)?;
 
         if let SurfaceType::Scanout = scanout_type {
+            super::gvm_scanout::trace(format_args!(
+                "set-scanout {} res={} blob={}",
+                scanout_id,
+                resource_id,
+                scanout_data.is_some() as u8
+            ));
             // iceland gvm: which resource each scanout shows (Xorg / a compositor may switch it)
             super::gvm_scanout::note(
                 "SET-SCANOUT",

@@ -76,6 +76,19 @@ fn dump_cfg() -> (u64, u32) {
     })
 }
 
+/// CROSVM_GVM_TRACE_SCANOUT=1: every SET_SCANOUT / RESOURCE_FLUSH (first 400), to see what an atomic-KMS
+/// guest really sends (vm-run v9: atomic kmscube never reached the scanout).
+pub fn trace(text: std::fmt::Arguments) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if !*ON.get_or_init(|| std::env::var("CROSVM_GVM_TRACE_SCANOUT").is_ok_and(|v| v == "1")) {
+        return;
+    }
+    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 400 {
+        warn!("GVM-TRACE {}", text);
+    }
+}
+
 /// One warn line per event kind and resource (at most 64 lines): which resources the guest flushes and
 /// which one a scanout shows.
 pub fn note(kind: &str, resource_id: u32, text: &str) {
