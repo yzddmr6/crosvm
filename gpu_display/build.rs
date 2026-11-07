@@ -94,6 +94,7 @@ fn build_wayland() {
         "xdg-shell",
         "viewporter",
         "virtio-gpu-metadata-v1",
+        "xdg-decoration-unstable-v1",
     ] {
         build.file(compile_protocol(protocol, &out_dir));
     }

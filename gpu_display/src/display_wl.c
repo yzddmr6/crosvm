@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -24,6 +25,7 @@
 #include "viewporter.h"
 #include "xdg-shell.h"
 #include "virtio-gpu-metadata-v1.h"
+#include "xdg-decoration-unstable-v1.h"
 #include <wayland-client-core.h>
 #include <wayland-client-protocol.h>
 #include <wayland-client.h>
@@ -72,6 +74,7 @@ struct interfaces {
 	struct xdg_wm_base *xdg_wm_base;
 	struct wp_viewporter *viewporter; // optional
 	struct wp_virtio_gpu_metadata_v1 *virtio_gpu_metadata; // optional
+	struct zxdg_decoration_manager_v1 *decoration_manager; /* iceland gvm: KWin server-side frame */
 };
 
 struct output {
@@ -132,6 +135,7 @@ struct dwl_surface {
 	struct zaura_surface *aura;
 	struct xdg_surface *xdg_surface;
 	struct xdg_toplevel *xdg_toplevel;
+	struct zxdg_toplevel_decoration_v1 *decoration;
 	struct wp_viewport *viewport;
 	struct wp_virtio_gpu_surface_metadata_v1 *virtio_gpu_surface_metadata;
 	struct wl_subsurface *subsurface;
@@ -619,6 +623,11 @@ static void registry_global(void *data, struct wl_registry *registry,
 	} else if (strcmp(interface, "wp_viewporter") == 0) {
 		ifaces->viewporter = (struct wp_viewporter *)wl_registry_bind(
 		    registry, id, &wp_viewporter_interface, 1);
+	} else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
+		/* iceland gvm: KWin (Plasma) draws a title bar / close button when asked;
+		 * Mutter does not offer this global, so GNOME is unchanged. */
+		ifaces->decoration_manager = (struct zxdg_decoration_manager_v1 *)wl_registry_bind(
+		    registry, id, &zxdg_decoration_manager_v1_interface, 1);
 	} else if (strcmp(interface, "wp_virtio_gpu_metadata_v1") == 0) {
 		ifaces->virtio_gpu_metadata =
 			(struct wp_virtio_gpu_metadata_v1 *)wl_registry_bind(
@@ -665,7 +674,18 @@ static void toplevel_close(void *data,
 {
 	(void)xdg_toplevel;
 	struct dwl_surface *surface = (struct dwl_surface *)data;
-	surface->close_requested = true;
+	/* iceland gvm: upstream turns a window close into a hard VM exit (no guest
+	 * shutdown). KWin's title-bar close button makes that one tap away, so by
+	 * default only report it: the iceland-vms supervisor sees this line and
+	 * shuts the guest down cleanly through its agent. CROSVM_GVM_CLOSE=exit
+	 * restores the upstream behaviour. */
+	const char *mode = getenv("CROSVM_GVM_CLOSE");
+	if (mode && strcmp(mode, "exit") == 0) {
+		surface->close_requested = true;
+		return;
+	}
+	fprintf(stderr, "GVM-WINDOW-CLOSE requested by the compositor\n");
+	fflush(stderr);
 }
 
 static const struct xdg_toplevel_listener toplevel_listener = {
@@ -1095,6 +1115,16 @@ struct dwl_surface *dwl_context_surface_new(struct dwl_context *self,
 		xdg_toplevel_set_app_id(disp_surface->xdg_toplevel, app_id && *app_id ? app_id : "crosvm");
 		xdg_toplevel_add_listener(disp_surface->xdg_toplevel,
 					      &toplevel_listener, disp_surface);
+		if (self->ifaces.decoration_manager &&
+		    !(getenv("CROSVM_GVM_NO_SSD") && *getenv("CROSVM_GVM_NO_SSD"))) {
+			disp_surface->decoration =
+			    zxdg_decoration_manager_v1_get_toplevel_decoration(
+				self->ifaces.decoration_manager, disp_surface->xdg_toplevel);
+			if (disp_surface->decoration)
+				zxdg_toplevel_decoration_v1_set_mode(
+				    disp_surface->decoration,
+				    ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+		}
 
 		xdg_surface_add_listener(disp_surface->xdg_surface,
 					     &xdg_surface_listener,
@@ -1193,6 +1223,8 @@ fail:
 		wp_viewport_destroy(disp_surface->viewport);
 	if (disp_surface->subsurface)
 		wl_subsurface_destroy(disp_surface->subsurface);
+	if (disp_surface->decoration)
+		zxdg_toplevel_decoration_v1_destroy(disp_surface->decoration);
 	if (disp_surface->xdg_toplevel)
 		xdg_toplevel_destroy(disp_surface->xdg_toplevel);
 	if (disp_surface->xdg_surface)
@@ -1222,6 +1254,8 @@ void dwl_surface_destroy(struct dwl_surface **self)
 		wp_viewport_destroy((*self)->viewport);
 	if ((*self)->subsurface)
 		wl_subsurface_destroy((*self)->subsurface);
+	if ((*self)->decoration)
+		zxdg_toplevel_decoration_v1_destroy((*self)->decoration);
 	if ((*self)->xdg_toplevel)
 		xdg_toplevel_destroy((*self)->xdg_toplevel);
 	if ((*self)->xdg_surface)
