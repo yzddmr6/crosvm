@@ -1088,7 +1088,11 @@ struct dwl_surface *dwl_context_surface_new(struct dwl_context *self,
 			self->error_callback("failed to make toplevel xdg shell surface");
 			goto fail;
 		}
-		xdg_toplevel_set_title(disp_surface->xdg_toplevel, "crosvm");
+		/* iceland gvm: window title / app id from the environment ("Unknown" in GNOME otherwise) */
+		const char *title = getenv("CROSVM_GVM_WINDOW_TITLE");
+		const char *app_id = getenv("CROSVM_GVM_APP_ID");
+		xdg_toplevel_set_title(disp_surface->xdg_toplevel, title && *title ? title : "crosvm");
+		xdg_toplevel_set_app_id(disp_surface->xdg_toplevel, app_id && *app_id ? app_id : "crosvm");
 		xdg_toplevel_add_listener(disp_surface->xdg_toplevel,
 					      &toplevel_listener, disp_surface);
 

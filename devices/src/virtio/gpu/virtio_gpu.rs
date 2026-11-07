@@ -411,9 +411,16 @@ impl VirtioGpuScanout {
             _ => return Ok(OkNoData),
         };
 
-        if let Some(import_id) =
+        // iceland gvm: the dmabuf import of 3D (virgl) scanout resources gives a black or frozen window on
+        // GNOME / Mutter (modifier 0 is assumed for scanout_data, the compositor may reject the buffer
+        // asynchronously). Default to the copy path (transfer_read into the shm framebuffer), which works for
+        // every resource; CROSVM_GVM_SCANOUT_IMPORT=1 restores the import.
+        let try_import = std::env::var_os("CROSVM_GVM_SCANOUT_IMPORT").is_some_and(|v| v == "1");
+        if let Some(import_id) = if try_import {
             VirtioGpuScanout::import_resource_to_display(display, surface_id, resource, rutabaga)
-        {
+        } else {
+            None
+        } {
             display
                 .borrow_mut()
                 .flip_to(surface_id, import_id, None, None, None)
