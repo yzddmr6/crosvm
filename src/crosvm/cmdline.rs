@@ -107,6 +107,8 @@ use crate::crosvm::config::MemOptions;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::crosvm::config::NestedConfig;
 #[cfg(target_arch = "aarch64")]
+use crate::crosvm::config::SimplefbConfig;
+#[cfg(target_arch = "aarch64")]
 use crate::crosvm::config::ToggleMode;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFrontendOption;
@@ -1970,6 +1972,19 @@ pub struct RunCommand {
     /// for testing purposes.
     pub simple_media_device: Option<bool>,
 
+    #[cfg(target_arch = "aarch64")]
+    #[argh(option, arg_name = "width=W,height=H[,format=F][,poll-hz=N]")]
+    /// iceland gvm: a simple framebuffer for the guest, in memory
+    /// shared with the host (just below the swiotlb), shown in a
+    /// window on the --wayland-sock compositor with keyboard and
+    /// touch input as virtio-input devices.
+    /// Possible key values:
+    ///     width=W, height=H - size in pixels
+    ///     format=F - a8r8g8b8 (default) or x8r8g8b8
+    ///     poll-hz=N - times a second the host looks for a new
+    ///     picture (default: 60)
+    pub simplefb: Option<SimplefbConfig>,
+
     #[argh(
         option,
         arg_name = "[path=]PATH[,width=WIDTH][,height=HEIGHT][,name=NAME]",
@@ -2468,6 +2483,7 @@ impl TryFrom<RunCommand> for super::config::Config {
             }
             cfg.no_pmu = cmd.no_pmu.unwrap_or_default();
             cfg.swiotlb = cmd.swiotlb;
+            cfg.simplefb = cmd.simplefb;
         }
 
         #[cfg(all(target_os = "android", target_arch = "aarch64"))]

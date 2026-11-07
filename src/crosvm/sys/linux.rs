@@ -15,6 +15,8 @@ pub(crate) mod jail_warden;
 pub(crate) mod pci_hotplug_helpers;
 #[cfg(feature = "pci-hotplug")]
 pub(crate) mod pci_hotplug_manager;
+#[cfg(all(feature = "gpu", target_arch = "aarch64"))]
+mod simplefb_display;
 mod vcpu;
 
 #[cfg(all(feature = "pvclock", target_arch = "aarch64"))]
@@ -229,6 +231,9 @@ fn create_virtio_devices(
     #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
     #[cfg(feature = "gpu")] has_vfio_gfx_device: bool,
     #[cfg(feature = "registered_events")] registered_evt_q: &SendTube,
+    #[cfg(feature = "gpu")]
+    #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
+    simplefb_event_devices: &mut Vec<EventDevice>,
 ) -> DeviceResult<Vec<VirtioDeviceStub>> {
     let mut devs = Vec::new();
 
@@ -392,6 +397,52 @@ fn create_virtio_devices(
                 )?,
             ));
         }
+    }
+
+    // iceland gvm: `--simplefb` window input: a multi-touch device the size of the framebuffer
+    // (the Wayland backend turns the left button / touch into touch events) and a keyboard, fed by
+    // the simplefb display bridge exactly like --display-window-mouse / --display-window-keyboard
+    // feed the virtio-gpu window. Indices below u32::MAX keep them apart from those devices.
+    #[cfg(all(feature = "gpu", target_arch = "aarch64"))]
+    if let Some(sfb) = &cfg.simplefb {
+        let (event_device_socket, virtio_dev_socket) =
+            StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte)
+                .context("failed to create socket")?;
+        let dev = virtio::input::new_multi_touch(
+            u32::MAX - 2,
+            virtio_dev_socket,
+            sfb.width,
+            sfb.height,
+            Some("gvm simplefb touch"),
+            virtio::base_features(cfg.protection_type),
+        )
+        .context("failed to set up simplefb touch device")?;
+        devs.push((
+            "simplefb_touch",
+            VirtioDeviceStub {
+                dev: Box::new(dev),
+                jail: simple_jail(cfg.jail_config.as_ref(), "input_device")?,
+            },
+        ));
+        simplefb_event_devices.push(EventDevice::touchscreen(event_device_socket));
+
+        let (event_device_socket, virtio_dev_socket) =
+            StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte)
+                .context("failed to create socket")?;
+        let dev = virtio::input::new_keyboard(
+            u32::MAX - 3,
+            virtio_dev_socket,
+            virtio::base_features(cfg.protection_type),
+        )
+        .context("failed to set up simplefb keyboard device")?;
+        devs.push((
+            "simplefb_keyboard",
+            VirtioDeviceStub {
+                dev: Box::new(dev),
+                jail: simple_jail(cfg.jail_config.as_ref(), "input_device")?,
+            },
+        ));
+        simplefb_event_devices.push(EventDevice::keyboard(event_device_socket));
     }
 
     #[cfg(feature = "pvclock")]
@@ -844,6 +895,7 @@ fn create_devices(
     vfio_container_manager: &mut VfioContainerManager,
     // Stores a set of PID of child processes that are suppose to exit cleanly.
     worker_process_pids: &mut BTreeSet<Pid>,
+    #[cfg(feature = "gpu")] simplefb_event_devices: &mut Vec<EventDevice>,
 ) -> DeviceResult<Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>> {
     let mut devices: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)> = Vec::new();
     #[cfg(feature = "balloon")]
@@ -979,6 +1031,8 @@ fn create_devices(
         has_vfio_gfx_device,
         #[cfg(feature = "registered_events")]
         registered_evt_q,
+        #[cfg(feature = "gpu")]
+        simplefb_event_devices,
     )?;
 
     for stub in stubs {
@@ -1545,6 +1599,11 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
             })
             .collect::<Result<Vec<SDT>>>()?,
         rt_cpus: cfg.rt_cpus.clone(),
+        simplefb: cfg.simplefb.as_ref().map(|s| arch::SimplefbParams {
+            width: s.width,
+            height: s.height,
+            format: s.format.clone(),
+        }),
         delay_rt: cfg.delay_rt,
         no_i8042: cfg.no_i8042,
         no_rtc: cfg.no_rtc,
@@ -2214,6 +2273,10 @@ fn run_vm(
         Tube::directional_pair().context("failed to create registered event tube")?;
 
     let mut worker_process_pids = BTreeSet::new();
+    // iceland gvm: the `--simplefb` window's input devices, handed to its display bridge.
+    #[cfg(feature = "gpu")]
+    #[cfg_attr(not(target_arch = "aarch64"), allow(unused_mut))]
+    let mut simplefb_event_devices: Vec<EventDevice> = Vec::new();
 
     let mut devices = create_devices(
         &cfg,
@@ -2231,6 +2294,8 @@ fn run_vm(
         &reg_evt_wrtube,
         &mut vfio_container_manager,
         &mut worker_process_pids,
+        #[cfg(feature = "gpu")]
+        &mut simplefb_event_devices,
     )?;
 
     #[cfg(feature = "pci-hotplug")]
@@ -2480,6 +2545,36 @@ fn run_vm(
                 )
             })?
     };
+
+    // iceland gvm: `--simplefb`: the bridge that shows the shared framebuffer in a window.
+    #[cfg(all(feature = "gpu", target_arch = "aarch64"))]
+    if let Some(sfb) = &cfg.simplefb {
+        let region = linux
+            .vm
+            .get_memory()
+            .regions()
+            .find(|r| r.options.purpose == vm_memory::MemoryRegionPurpose::SharedFramebuffer)
+            .map(|r| (r.guest_addr.offset(), r.size as u64))
+            .context("--simplefb: no framebuffer region in guest memory")?;
+        let params = simplefb_display::SimplefbParams {
+            addr: region.0,
+            size: region.1,
+            width: sfb.width,
+            height: sfb.height,
+            stride: sfb.width * arch::SimplefbParams::BYTES_PER_PIXEL,
+            format: sfb.format.clone(),
+            poll_hz: sfb.poll_hz,
+            wayland_socket: cfg.wayland_socket_paths.get("").cloned(),
+        };
+        simplefb_display::start(
+            linux.vm.get_memory().clone(),
+            params,
+            std::mem::take(&mut simplefb_event_devices),
+            vm_evt_wrtube
+                .try_clone()
+                .context("--simplefb: failed to clone the VM event tube")?,
+        )?;
+    }
 
     #[cfg(feature = "gpu")]
     let flags = RutabagaGrallocBackendFlags::new().disable_vulkano();

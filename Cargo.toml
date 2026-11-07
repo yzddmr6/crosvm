@@ -662,6 +662,8 @@ aarch64 = { workspace = true }
 device_virtio_fs = { workspace = true }
 device_virtio_9p = { workspace = true }
 device_virtio_pmem = { workspace = true }
+# iceland gvm: the --simplefb display bridge opens its own window
+gpu_display = { workspace = true, optional = true }
 minijail = "*" # provided by ebuild
 p9 = "0.3.1"
 vhost = { workspace = true, optional = true }

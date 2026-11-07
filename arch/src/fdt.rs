@@ -198,6 +198,10 @@ pub fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> 
             MemoryRegionPurpose::GuestMemoryRegion => true,
             MemoryRegionPurpose::ProtectedFirmwareRegion => true,
             MemoryRegionPurpose::ReservedMemory => true,
+            // Carved from the top of RAM; a no-map reserved-memory node keeps it out of the
+            // guest's allocator.
+            #[cfg(target_arch = "aarch64")]
+            MemoryRegionPurpose::SharedFramebuffer => true,
             #[cfg(target_arch = "aarch64")]
             MemoryRegionPurpose::StaticSwiotlbRegion => true,
         })

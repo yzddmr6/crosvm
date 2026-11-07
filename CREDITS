@@ -1,0 +1,13 @@
+Credits for material in this tree that is not from upstream crosvm
+==================================================================
+
+Upstream crosvm files stay under their BSD-3-Clause license (LICENSE).
+
+- DroidVM dvm-crosvm 849e05f (https://github.com/Droid-VM/crosvm, branch droidvm; GPL-2.0-or-later with the permissions
+  in ADDITIONAL-PERMISSIONS; GPL text in LICENSE.GPL-2.0): the simple-framebuffer ("--simplefb")
+  design -- a framebuffer in host-shared memory just below the static swiotlb, a no-map
+  reserved-memory region plus a simple-framebuffer device-tree node, the region shared (not lent)
+  on Gunyah, and a host thread that polls it and presents it, with data-cache invalidation before
+  each read. Ported in reduced form into aarch64/src/simplefb.rs and
+  src/crosvm/sys/linux/simplefb_display.rs, which keep DroidVM's SPDX / copyright header.
+  Nothing was taken from the DroidVM app or DroidVM-Daemon repositories.

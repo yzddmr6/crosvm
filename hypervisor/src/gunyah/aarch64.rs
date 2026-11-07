@@ -101,7 +101,8 @@ impl VmAArch64 for GunyahVm {
                     firmware_set = true;
                     memory_node.set_prop("firmware-address", region.guest_addr.offset())?;
                 }
-                MemoryRegionPurpose::StaticSwiotlbRegion => {
+                MemoryRegionPurpose::StaticSwiotlbRegion
+                | MemoryRegionPurpose::SharedFramebuffer => {
                     size += region.size as u64;
                 }
                 _ => {}
@@ -164,6 +165,9 @@ impl VmAArch64 for GunyahVm {
                 // Described by the "firmware-address" property
                 MemoryRegionPurpose::ProtectedFirmwareRegion => false,
                 MemoryRegionPurpose::ReservedMemory => false,
+                // iceland gvm: shared like the swiotlb: the RM builds a memparcel for it and the
+                // guest gets its stage-2 mapping at boot (no runtime accept).
+                MemoryRegionPurpose::SharedFramebuffer => true,
                 MemoryRegionPurpose::StaticSwiotlbRegion => true,
             };
 

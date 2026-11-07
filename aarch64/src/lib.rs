@@ -98,6 +98,7 @@ use vm_memory::MemoryRegionOptions;
 use vm_memory::MemoryRegionPurpose;
 
 mod fdt;
+mod simplefb;
 
 const AARCH64_FDT_MAX_SIZE: u64 = 0x200000;
 const AARCH64_FDT_ALIGN: u64 = 0x200000;
@@ -351,6 +352,8 @@ pub enum Error {
     SetReg(base::Error),
     #[error("failed to set up guest memory: {0}")]
     SetupGuestMemory(GuestMemoryError),
+    #[error("--simplefb does not fit: {0}")]
+    SimplefbLayout(String),
     #[error("this function isn't supported")]
     Unsupported,
     #[error("failed to initialize VCPU: {0}")]
@@ -416,7 +419,43 @@ fn main_memory_size(components: &VmComponents, hypervisor: &(impl Hypervisor + ?
             main_memory_size -= size;
         }
     }
+    // iceland gvm: the simplefb framebuffer sits just below it (validated in
+    // guest_memory_layout before anything uses this).
+    if let Some((_, fb_size)) = simplefb_region(
+        components.simplefb.as_ref(),
+        components.memory_size,
+        components.swiotlb,
+        hypervisor,
+    ) {
+        main_memory_size -= fb_size;
+    }
     main_memory_size
+}
+
+/// Size of the swiotlb carved out of the top of the `--mem` block (0 unless static).
+fn static_swiotlb_size(swiotlb: Option<u64>, hypervisor: &(impl Hypervisor + ?Sized)) -> u64 {
+    match swiotlb {
+        Some(size) if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) => {
+            size
+        }
+        _ => 0,
+    }
+}
+
+/// iceland gvm: (guest address, size) of the `--simplefb` region, None without `--simplefb` or
+/// when it does not fit.
+fn simplefb_region(
+    simplefb: Option<&arch::SimplefbParams>,
+    memory_size: u64,
+    swiotlb: Option<u64>,
+    hypervisor: &(impl Hypervisor + ?Sized),
+) -> Option<(u64, u64)> {
+    let sfb = simplefb?;
+    let swiotlb = static_swiotlb_size(swiotlb, hypervisor);
+    Some((
+        simplefb::simplefb_addr(sfb, memory_size, swiotlb)?,
+        simplefb::simplefb_size(sfb, memory_size, swiotlb)?,
+    ))
 }
 
 pub struct ArchMemoryLayout {
@@ -475,6 +514,24 @@ impl arch::LinuxArch for AArch64 {
         _arch_memory_layout: &Self::ArchMemoryLayout,
         hypervisor: &impl Hypervisor,
     ) -> std::result::Result<Vec<(GuestAddress, u64, MemoryRegionOptions)>, Self::Error> {
+        let simplefb = simplefb_region(
+            components.simplefb.as_ref(),
+            components.memory_size,
+            components.swiotlb,
+            hypervisor,
+        );
+        if let Some(sfb) = &components.simplefb {
+            if simplefb.is_none() {
+                return Err(Error::SimplefbLayout(format!(
+                    "{}x{} needs {:#x} bytes, --mem is {:#x} (swiotlb {:#x})",
+                    sfb.width,
+                    sfb.height,
+                    sfb.data_size(),
+                    components.memory_size,
+                    static_swiotlb_size(components.swiotlb, hypervisor),
+                )));
+            }
+        }
         let main_memory_size = main_memory_size(components, hypervisor);
 
         let mut memory_regions = vec![(
@@ -500,6 +557,18 @@ impl arch::LinuxArch for AArch64 {
                     MemoryRegionOptions::new().purpose(MemoryRegionPurpose::StaticSwiotlbRegion),
                 ));
             }
+        }
+
+        // iceland gvm: the simplefb framebuffer, its own region so the hypervisor shares it
+        // instead of lending it (see MemoryRegionPurpose::SharedFramebuffer).
+        if let Some((addr, size)) = simplefb {
+            memory_regions.push((
+                GuestAddress(addr),
+                size,
+                MemoryRegionOptions::new()
+                    .purpose(MemoryRegionPurpose::SharedFramebuffer)
+                    .align(2 << 20),
+            ));
         }
 
         Ok(memory_regions)
@@ -1038,6 +1107,24 @@ impl arch::LinuxArch for AArch64 {
             timeout_sec: VMWDT_DEFAULT_TIMEOUT_SEC,
         };
 
+        // iceland gvm: the `simple-framebuffer` node for `--simplefb`.
+        let simplefb_dt = components.simplefb.as_ref().and_then(|sfb| {
+            let (addr, size) = simplefb_region(
+                Some(sfb),
+                components.memory_size,
+                components.swiotlb,
+                vm.get_hypervisor(),
+            )?;
+            Some(simplefb::SimplefbDtConfig {
+                addr,
+                size,
+                width: sfb.width,
+                height: sfb.height,
+                stride: sfb.stride(),
+                format: sfb.format.clone(),
+            })
+        });
+
         fdt::create_fdt(
             AARCH64_FDT_MAX_SIZE as usize,
             &mem,
@@ -1068,6 +1155,7 @@ impl arch::LinuxArch for AArch64 {
             }),
             bat_mmio_base_and_irq,
             vmwdt_cfg,
+            simplefb_dt,
             dump_device_tree_blob,
             &|writer, phandles| vm.create_fdt(writer, phandles),
             device_tree_overlays,

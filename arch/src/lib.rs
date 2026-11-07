@@ -489,6 +489,31 @@ pub fn derive_vcpu_properties(
     vcpu_properties
 }
 
+/// iceland gvm: a simple framebuffer for the guest (`--simplefb`), after DroidVM's
+/// `SimplefbParams` (dvm-crosvm 849e05f). Only the two 32-bit formats the host window takes
+/// without conversion exist: "a8r8g8b8" and "x8r8g8b8" (both B,G,R,A/X bytes in memory).
+#[derive(Clone, Debug)]
+pub struct SimplefbParams {
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+}
+
+impl SimplefbParams {
+    /// Bytes per pixel (both supported formats are 32-bit).
+    pub const BYTES_PER_PIXEL: u32 = 4;
+
+    /// The row pitch written into the device tree: packed rows.
+    pub fn stride(&self) -> u32 {
+        self.width * Self::BYTES_PER_PIXEL
+    }
+
+    /// Bytes the guest can draw into (stride * height).
+    pub fn data_size(&self) -> u64 {
+        self.stride() as u64 * self.height as u64
+    }
+}
+
 /// Holds the pieces needed to build a VM. Passed to `build_vm` in the `LinuxArch` trait below to
 /// create a `RunnableLinuxVm`.
 #[sorted]
@@ -527,6 +552,8 @@ pub struct VmComponents {
     /// `hv_cfg.protection_type == ProtectionType::UnprotectedWithFirmware`.
     pub pvm_fw: Option<File>,
     pub rt_cpus: CpuSet,
+    /// iceland gvm: `--simplefb` (aarch64 only; ignored elsewhere).
+    pub simplefb: Option<SimplefbParams>,
     #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
     pub smccc_trng: bool,

@@ -274,6 +274,10 @@ impl GunyahVm {
                     #[cfg(target_arch = "aarch64")]
                     MemoryRegionPurpose::ProtectedFirmwareRegion => true,
                     MemoryRegionPurpose::ReservedMemory => true,
+                    // iceland gvm: the simplefb framebuffer is SHARED like the swiotlb: the host
+                    // keeps reading it while the guest draws (lent memory would SIGBUS the host).
+                    #[cfg(target_arch = "aarch64")]
+                    MemoryRegionPurpose::SharedFramebuffer => false,
                     #[cfg(target_arch = "aarch64")]
                     MemoryRegionPurpose::StaticSwiotlbRegion => false,
                 }

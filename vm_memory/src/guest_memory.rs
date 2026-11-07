@@ -142,6 +142,12 @@ pub enum MemoryRegionPurpose {
     /// guest.
     ReservedMemory,
 
+    /// iceland gvm: the simplefb framebuffer (`--simplefb`). Shared with the host like the static
+    /// swiotlb (never lent to a protected guest), declared to the guest as a no-map reserved-memory
+    /// region that a `simple-framebuffer` node points at.
+    #[cfg(target_arch = "aarch64")]
+    SharedFramebuffer,
+
     #[cfg(target_arch = "aarch64")]
     StaticSwiotlbRegion,
 }

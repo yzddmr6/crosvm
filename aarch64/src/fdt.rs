@@ -61,6 +61,8 @@ use crate::AARCH64_VMWDT_IRQ;
 const PHANDLE_GIC: u32 = 1;
 const PHANDLE_GIC_ITS: u32 = 3;
 const PHANDLE_RESTRICTED_DMA_POOL: u32 = 2;
+// iceland gvm: the simplefb framebuffer's reserved-memory region.
+const PHANDLE_SIMPLEFB_RESERVED: u32 = 5;
 
 // CPUs are assigned phandles starting with this number.
 const PHANDLE_CPU0: u32 = 0x100;
@@ -657,6 +659,7 @@ pub fn create_fdt(
     swiotlb: Option<(Option<GuestAddress>, u64)>,
     bat_mmio_base_and_irq: Option<(u64, u32)>,
     vmwdt_cfg: VmWdtConfig,
+    simplefb: Option<crate::simplefb::SimplefbDtConfig>,
     dump_device_tree_blob: Option<PathBuf>,
     vm_generator: &impl Fn(&mut Fdt, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
     device_tree_overlays: Vec<DtbOverlay>,
@@ -712,7 +715,24 @@ pub fn create_fdt(
         None
     };
 
+    // iceland gvm: `--simplefb`: keep the framebuffer out of the guest's page allocator (no-map);
+    // the simple-framebuffer node below points at this region.
+    if let Some(sfb) = &simplefb {
+        reserved_memory_regions.push(ReservedMemoryRegion {
+            address: Some(GuestAddress(sfb.addr)),
+            size: sfb.size,
+            phandle: Some(PHANDLE_SIMPLEFB_RESERVED),
+            name: "simplefb_reserved",
+            compatible: None,
+            alignment: None,
+            no_map: true,
+        });
+    }
+
     create_reserved_memory_node(&mut fdt, &reserved_memory_regions)?;
+    if let Some(sfb) = &simplefb {
+        crate::simplefb::create_simplefb_node(&mut fdt, sfb, PHANDLE_SIMPLEFB_RESERVED)?;
+    }
 
     create_cpu_nodes(
         &mut fdt,

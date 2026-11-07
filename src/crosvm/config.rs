@@ -409,6 +409,45 @@ pub fn invalid_value_err<T: AsRef<str>, S: ToString>(value: T, expected: S) -> S
     format!("invalid value {}: {}", value.as_ref(), expected.to_string())
 }
 
+/// iceland gvm: `--simplefb width=W,height=H[,format=F][,poll-hz=N]`, after DroidVM's
+/// `SimplefbConfig` (dvm-crosvm 849e05f).
+#[derive(Clone, Debug, Serialize, Deserialize, FromKeyValues, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SimplefbConfig {
+    pub width: u32,
+    pub height: u32,
+    /// Device-tree `format` string: "a8r8g8b8" (default, as DroidVM) or "x8r8g8b8".
+    #[serde(default = "default_simplefb_format")]
+    pub format: String,
+    /// How many times a second the host looks at the framebuffer (the guest announces nothing).
+    #[serde(default = "default_simplefb_poll_hz")]
+    pub poll_hz: u32,
+}
+
+fn default_simplefb_format() -> String {
+    "a8r8g8b8".to_string()
+}
+
+fn default_simplefb_poll_hz() -> u32 {
+    60
+}
+
+fn validate_simplefb(sfb: &SimplefbConfig) -> Result<(), String> {
+    if !matches!(sfb.format.as_str(), "a8r8g8b8" | "x8r8g8b8") {
+        return Err(format!(
+            "`simplefb` format {} is not supported (a8r8g8b8 or x8r8g8b8)",
+            sfb.format
+        ));
+    }
+    if sfb.width < 64 || sfb.height < 64 || sfb.width > 8192 || sfb.height > 8192 {
+        return Err("`simplefb` width and height must be 64..8192".to_string());
+    }
+    if !(1..=240).contains(&sfb.poll_hz) {
+        return Err("`simplefb` poll-hz must be 1..240".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct BatteryConfig {
@@ -710,6 +749,7 @@ pub struct Config {
     pub service_pipe_name: Option<String>,
     #[cfg(feature = "media")]
     pub simple_media_device: bool,
+    pub simplefb: Option<SimplefbConfig>,
     #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
     pub slirp_capture_file: Option<String>,
     #[cfg(target_arch = "x86_64")]
@@ -936,6 +976,7 @@ impl Default for Config {
             service_pipe_name: None,
             #[cfg(feature = "media")]
             simple_media_device: Default::default(),
+            simplefb: None,
             #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             slirp_capture_file: None,
             #[cfg(target_arch = "x86_64")]
@@ -1008,6 +1049,9 @@ pub fn validate_config(cfg: &mut Config) -> std::result::Result<(), String> {
     #[cfg(feature = "gpu")]
     {
         crate::crosvm::gpu_config::validate_gpu_config(cfg)?;
+    }
+    if let Some(sfb) = &cfg.simplefb {
+        validate_simplefb(sfb)?;
     }
     #[cfg(feature = "gdb")]
     if cfg.gdb.is_some() && cfg.vcpu_count.unwrap_or(1) != 1 {

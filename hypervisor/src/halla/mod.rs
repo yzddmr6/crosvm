@@ -635,6 +635,7 @@ impl HallaVm {
                 MemoryRegionPurpose::GuestMemoryRegion => HVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::ProtectedFirmwareRegion => HVM_USER_MEM_REGION_PROTECT_FW,
                 MemoryRegionPurpose::ReservedMemory => HVM_USER_MEM_REGION_GUEST_MEM,
+                MemoryRegionPurpose::SharedFramebuffer => HVM_USER_MEM_REGION_GUEST_MEM,
                 MemoryRegionPurpose::StaticSwiotlbRegion => HVM_USER_MEM_REGION_STATIC_SWIOTLB,
             };
             // SAFETY:
