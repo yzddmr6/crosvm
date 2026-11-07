@@ -389,8 +389,12 @@ pub fn fill(
         let (every, max) = dump_cfg();
         let dump = dump_dir().is_some()
             && st.dumps < max
-            && (st.last_dump_res != resource_id
-                || st.last_dump.is_none_or(|t| t.elapsed() >= Duration::from_secs(every)));
+            && st.last_dump.is_none_or(|t| {
+                // a scanout resource change dumps at once, but at most once a second (v3 run: page flips
+                // between 3 resources made a dump per flip); otherwise every `every` seconds
+                (st.last_dump_res != resource_id && t.elapsed() >= Duration::from_secs(1))
+                    || t.elapsed() >= Duration::from_secs(every)
+            });
         if dump {
             let mut line = format!(
                 "GVM-FRAME {} res={} {}x{} blob={} backing={} {} flush#{}",
@@ -404,7 +408,13 @@ pub fn fill(
                 st.flushes
             );
             let mut tmp = vec![0u8; dst.len()];
+            // the CPU read of the exported dmabuf only on request (CROSVM_GVM_DUMP_DMABUF=1): v3 run, the tablet
+            // reset shortly after the last dump of a page-flipping glamor desktop; keep the dumps minimal
+            let dmabuf = std::env::var("CROSVM_GVM_DUMP_DMABUF").is_ok_and(|v| v == "1");
             for m in [ReadMode::Ctx0, ReadMode::Dmabuf, ReadMode::Backing] {
+                if m == ReadMode::Dmabuf && !dmabuf {
+                    continue;
+                }
                 tmp.iter_mut().for_each(|b| *b = 0);
                 match read_from(m, rutabaga, resource_id, width, height, stride, &mut tmp, backing.as_ref()) {
                     Ok(note) => {
