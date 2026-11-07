@@ -252,7 +252,17 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
         // the whole /hypervisor subtree (names + compatibles) so the next run says what is there.
         let found = ["gunyah-resource-manager", "qcom,resource-manager-1-0", "qcom,resource-manager"]
             .iter()
-            .find_map(|c| tree.find_prop(fdt::Match::Compatible(c), "reg").ok());
+            .find_map(|c| {
+                let hit = tree.find_prop(fdt::Match::Compatible(c), "reg").ok()?;
+                // fix run: the shim went silent right after this point; say which node it took
+                uart_str("SHIM: rm node by ");
+                uart_str(c);
+                uart_str(" reg len ");
+                uart_hex(hit.1 as u64);
+                uart_str("
+");
+                Some(hit)
+            });
         let (at, len) = match found.ok_or(fdt::Error::NotFound) {
             Ok(hit) => hit,
             Err(e) => {
@@ -289,6 +299,12 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
         let reg = tree.prop_bytes(at, 16).unwrap_or(&[]);
         let tx = fdt::be64(&reg[0..8]).unwrap_or(0);
         let rx = fdt::be64(&reg[8..16]).unwrap_or(0);
+        uart_str("SHIM: rm capids tx ");
+        uart_hex(tx);
+        uart_str(" rx ");
+        uart_hex(rx);
+        uart_str(", draining
+");
         let mut rm = rm::Rm::new(tx, rx);
         uart_str("SHIM: queue had ");
         uart_hex(rm.drain() as u64);

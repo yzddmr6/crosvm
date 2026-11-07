@@ -113,7 +113,8 @@ impl Rm {
     /// how many it dropped, which is worth printing while bringing a device up.
     pub fn drain(&mut self) -> u32 {
         let mut n = 0;
-        loop {
+        // fix run: an unbounded drain may never end if RECV keeps answering OK; 64 is far more than the queue holds
+        while n < 64 {
             // SAFETY: the queue is the one the device tree named, and the buffer is ours.
             let (err, got) = unsafe {
                 hvc(
@@ -130,6 +131,7 @@ impl Rm {
             }
             n += 1;
         }
+        n
     }
 
     /// Take a shared memparcel at a fixed address.
