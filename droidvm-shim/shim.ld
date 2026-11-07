@@ -12,7 +12,9 @@ ENTRY(_start)
 
 SECTIONS
 {
-	. = 0;
+	/* pvm49: linked at the address crosvm loads it to (AARCH64_PHYS_MEM_START), so an absolute pointer the compiler
+	 * emits (a table of &str, a vtable) points into the image instead of near zero; crosvm refuses any other base. */
+	. = 0x80000000;
 
 	.head : { KEEP(*(.head)) }
 	.text : { *(.text*) }

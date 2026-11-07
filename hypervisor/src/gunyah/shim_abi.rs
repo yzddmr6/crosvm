@@ -28,6 +28,8 @@ pub const SHIM_HEADER_MAGIC: u64 = 0x4d53_4856_554d_5644;
 /// "MVSHANDO", little-endian.
 pub const SHIM_HANDOFF_MAGIC: u64 = 0x4f44_4e41_4853_564d;
 pub const SHIM_ABI_VERSION: u32 = 1;
+/// The address the shim image is linked at (and crosvm must load it at): AARCH64_PHYS_MEM_START.
+pub const SHIM_LINK_BASE: u64 = 0x8000_0000;
 
 /// The most parcels one window may be shared as. A window is one parcel unless something forces
 /// it to be split, so this is headroom rather than a target: every parcel costs one of the 1024

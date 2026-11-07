@@ -468,6 +468,9 @@ fn load_shim(
 ) -> std::result::Result<(), Error> {
     use shim_abi as abi;
 
+    if at.offset() != abi::SHIM_LINK_BASE {
+        return Err(Error::ShimBadImage(at.offset()));
+    }
     let built_magic = SHIM_IMAGE
         .get(abi::SHIM_HEADER_OFFSET..abi::SHIM_HEADER_OFFSET + 8)
         .map(|b| u64::from_le_bytes(b.try_into().unwrap()))

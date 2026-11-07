@@ -145,6 +145,36 @@ fn die(err: u64, text: &str) -> ! {
     hang()
 }
 
+/// pvm49: one line per message-queue receive during the drain (error code and size).
+pub(crate) fn drain_trace(n: u32, err: u64, got: u64) {
+    uart_str("SHIM[22] rm: drain recv ");
+    uart_hex(n as u64);
+    uart_str(" err=");
+    uart_hex(err);
+    uart_str(" size=");
+    uart_hex(got);
+    uart_str("\r\n");
+}
+
+/// pvm49: a numbered marker before / after every step, so the last line on the console says exactly where the
+/// shim stopped (the output is the only trace: the shim runs before any console driver).
+fn step(n: u64, text: &str) {
+    uart_str("SHIM[");
+    uart_hex(n);
+    uart_str("] ");
+    uart_str(text);
+    uart_str("\r\n");
+}
+
+fn step_v(n: u64, text: &str, v: u64) {
+    uart_str("SHIM[");
+    uart_hex(n);
+    uart_str("] ");
+    uart_str(text);
+    uart_hex(v);
+    uart_str("\r\n");
+}
+
 fn hang() -> ! {
     loop {
         // SAFETY: wfi is a hint; there is nothing left to do and nobody to wake us.
@@ -164,6 +194,13 @@ fn panic(_info: &PanicInfo) -> ! {
 #[no_mangle]
 pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
     // SAFETY: the header lives in our own image, patched by crosvm before the VM started.
+    // pvm49: where we run and what the hypervisor passed, before anything else can go wrong
+    let pc: u64;
+    // SAFETY: reads the address of this instruction; no memory access.
+    unsafe { core::arch::asm!("adr {}, .", out(reg) pc, options(nomem, nostack)) };
+    uart_str("\r\n");
+    step_v(0x01, "entry pc=", pc);
+    step_v(0x02, "dtb=", dtb as u64);
     let hdr = unsafe { ptr::read_volatile(ptr::addr_of!(shim_header)) };
     if hdr.magic != SHIM_HEADER_MAGIC || hdr.version != SHIM_ABI_VERSION {
         // Nothing to complain into: the handoff address is in the header we just failed to trust.
@@ -189,6 +226,7 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
     }
     h.status = SHIM_STATUS_RUNNING;
     handoff_sync();
+    step(0x03, "header + handoff ok, waiting for ready");
 
     if hdr.payload == 0 {
         die(0, "no payload address in the header")
@@ -229,6 +267,7 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
         // off, so its loads bypass the caches: without cleaning the tree's lines to the point of
         // coherency first, the shim reads the tree as crosvm wrote it, before the RM touched it
         // (p6: "no gunyah-resource-manager node", while Linux, reading cacheably, finds it).
+        step(0x10, "dt: clean header lines");
         cache_flush(dtb as u64, 64);
         let blob = unsafe {
             let len = match fdt_total_size(dtb) {
@@ -247,22 +286,25 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
             Ok(t) => t,
             Err(_) => die(0, "the device tree header did not parse"),
         };
+        step(0x11, "dt: parsed");
         // iceland gvm (p7): the guest kernel finds "gunyah-resource-manager", but the shim did not
         // (error 5, /hypervisor present). Try the Qualcomm compatibles too, and if none matches print
         // the whole /hypervisor subtree (names + compatibles) so the next run says what is there.
-        let found = ["gunyah-resource-manager", "qcom,resource-manager-1-0", "qcom,resource-manager"]
-            .iter()
-            .find_map(|c| {
-                let hit = tree.find_prop(fdt::Match::Compatible(c), "reg").ok()?;
-                // fix run: the shim went silent right after this point; say which node it took
-                uart_str("SHIM: rm node by ");
-                uart_str(c);
-                uart_str(" reg len ");
-                uart_hex(hit.1 as u64);
-                uart_str("
-");
-                Some(hit)
-            });
+        // One literal per call, never a table: the shim is a flat image and a table of &str would hold
+        // absolute pointers (pvm49: the old table pointed at the link address and faulted the VM).
+        step(0x12, "rm: look up gunyah-resource-manager");
+        let mut found = tree.find_prop(fdt::Match::Compatible("gunyah-resource-manager"), "reg").ok();
+        if found.is_none() {
+            step(0x13, "rm: look up qcom,resource-manager-1-0");
+            found = tree.find_prop(fdt::Match::Compatible("qcom,resource-manager-1-0"), "reg").ok();
+        }
+        if found.is_none() {
+            step(0x14, "rm: look up qcom,resource-manager");
+            found = tree.find_prop(fdt::Match::Compatible("qcom,resource-manager"), "reg").ok();
+        }
+        if let Some(hit) = found {
+            step_v(0x15, "rm: node found, reg len ", hit.1 as u64);
+        }
         let (at, len) = match found.ok_or(fdt::Error::NotFound) {
             Ok(hit) => hit,
             Err(e) => {
@@ -303,11 +345,15 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
         uart_hex(tx);
         uart_str(" rx ");
         uart_hex(rx);
-        uart_str(", draining
-");
+        uart_str(", draining\r\n");
+        step_v(0x16, "rm: tx capid ", tx);
+        step_v(0x17, "rm: rx capid ", rx);
         let mut rm = rm::Rm::new(tx, rx);
+        step(0x20, "rm: drain the queue");
+        let drained = rm.drain();
+        step_v(0x21, "rm: drained messages ", drained as u64);
         uart_str("SHIM: queue had ");
-        uart_hex(rm.drain() as u64);
+        uart_hex(drained as u64);
         uart_str(" stale messages\r\n");
 
         uart_str("SHIM: rm tx ");
@@ -325,8 +371,9 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
             uart_str(" size ");
             uart_hex(p.size);
             uart_str("\r\n");
+            step_v(0x30, "accept: send MEM_ACCEPT for handle ", p.handle as u64);
             match rm.mem_accept(p.handle, p.base, p.size) {
-                Ok(()) => {}
+                Ok(()) => step(0x31, "accept: ok"),
                 Err(rm::Error::Refused(code)) => {
                     h.error = code as u64;
                     die(code as u64, "the resource manager refused MEM_ACCEPT")
@@ -379,11 +426,13 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
                 }
                 total += h.parcel[i].size;
             }
+            step(0x40, "dt: rewrite /memory");
             if tree.set_memory_window(h.parcel[0].base, total).is_err() {
                 die(0, "could not point /memory at the window")
             }
             // The tree was written with the MMU off; leave no stale line for Linux to read.
             cache_flush(dtb as u64, tree.len());
+            step(0x41, "dt: /memory rewritten");
             h.status = SHIM_STATUS_DT_DONE;
             uart_str("SHIM: /memory now ");
             uart_hex(h.parcel[0].base);
@@ -393,6 +442,7 @@ pub extern "C" fn shim_main(dtb: *mut u8) -> u64 {
         }
     }
 
+    step_v(0x50, "jump to ", hdr.payload);
     h.status = SHIM_STATUS_JUMPING;
     handoff_sync();
     uart_str("SHIM: jumping to ");

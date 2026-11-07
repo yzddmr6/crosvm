@@ -1326,6 +1326,27 @@ impl Vcpu for GunyahVcpu {
                     }
                 }
             }
+            // iceland gvm (pvm49): GUNYAH_VCPU_EXIT_PAGE_FAULT - a guest access the host kernel could not back
+            // (page_fault.attempt = its error). Say where; with CROSVM_GVM_FAULT_INJECT=1 resume with the
+            // fault (the kernel set resume_action = FAULT), so the guest takes an abort its own vector reports,
+            // instead of the VM dying silently. Default: the VM stops as before.
+            3 => {
+                // SAFETY: the union starts right after exit_reason; page_fault = { u64 phys_addr; i32 attempt;
+                // u8 resume_action } (include/uapi/linux/gunyah.h), inside the mapped run page.
+                let base = &run.__bindgen_anon_1 as *const _ as *const u8;
+                let (gpa, attempt) = unsafe {
+                    (
+                        std::ptr::read_unaligned(base as *const u64),
+                        std::ptr::read_unaligned(base.add(8) as *const i32),
+                    )
+                };
+                error!("GVM-PAGE-FAULT gpa={:#x} attempt={} (host could not back this guest access)", gpa, attempt);
+                if std::env::var("CROSVM_GVM_FAULT_INJECT").is_ok_and(|v| v == "1") {
+                    Ok(VcpuExit::IrqWindowOpen)
+                } else {
+                    Err(Error::new(EINVAL))
+                }
+            }
             r => {
                 warn!("unknown gh exit reason: {}", r);
                 Err(Error::new(EINVAL))

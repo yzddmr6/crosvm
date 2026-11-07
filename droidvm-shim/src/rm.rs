@@ -126,6 +126,7 @@ impl Rm {
                 )
             };
             cache_flush(self.rxbuf.as_ptr() as u64, self.rxbuf.len());
+            crate::drain_trace(n, err, got);
             if err != GH_ERROR_OK || got == 0 {
                 return n;
             }
