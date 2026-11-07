@@ -66,8 +66,32 @@ fn dump_dir() -> Option<&'static str> {
         .as_deref()
 }
 
+/// CROSVM_GVM_DUMP_EVERY (seconds, default 5) / CROSVM_GVM_DUMP_MAX (default 5): dump cadence; a scanout
+/// resource change always dumps (vm-run 24 Oct: 5 dumps in the first 25 s only saw the boot console).
+fn dump_cfg() -> (u64, u32) {
+    static CFG: OnceLock<(u64, u32)> = OnceLock::new();
+    *CFG.get_or_init(|| {
+        let n = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
+        (n("CROSVM_GVM_DUMP_EVERY", 5).max(1), n("CROSVM_GVM_DUMP_MAX", 5) as u32)
+    })
+}
+
+/// One warn line per event kind and resource (at most 64 lines): which resources the guest flushes and
+/// which one a scanout shows.
+pub fn note(kind: &str, resource_id: u32, text: &str) {
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.notes.len() < 64 && s.notes.insert((kind.to_string(), resource_id)) {
+            warn!("GVM-{} res={} {}", kind, resource_id, text);
+        }
+    })
+}
+
 #[derive(Default)]
 struct State {
+    /// (event kind, resource id) already logged by note()
+    notes: std::collections::BTreeSet<(String, u32)>,
+    last_dump_res: u32,
     /// resource id -> guest backing (host address, length) as attached by the guest
     backing: Map<u32, Vec<(usize, usize)>>,
     /// resource id -> the source that last gave a non-black frame (auto mode)
@@ -362,9 +386,11 @@ pub fn fill(
         let want = read_mode();
 
         // statistics of every source, every 5 s, at most 5 times
+        let (every, max) = dump_cfg();
         let dump = dump_dir().is_some()
-            && st.dumps < 5
-            && st.last_dump.is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
+            && st.dumps < max
+            && (st.last_dump_res != resource_id
+                || st.last_dump.is_none_or(|t| t.elapsed() >= Duration::from_secs(every)));
         if dump {
             let mut line = format!(
                 "GVM-FRAME {} res={} {}x{} blob={} backing={} {} flush#{}",
@@ -469,6 +495,7 @@ pub fn fill(
             }
             st.dumps += 1;
             st.last_dump = Some(Instant::now());
+            st.last_dump_res = resource_id;
         }
         used
     })

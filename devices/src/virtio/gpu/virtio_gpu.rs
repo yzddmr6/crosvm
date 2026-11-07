@@ -844,10 +844,25 @@ impl VirtioGpu {
             None => return Ok(OkNoData),
         };
 
+        let mut shown = false;
         for scanout in self.scanouts.values_mut() {
             if scanout.resource_id == resource_id {
+                shown = true;
                 scanout.flush(&self.display, resource, &mut self.rutabaga)?;
             }
+        }
+        if !shown && self.cursor_scanout.resource_id != resource_id {
+            // iceland gvm: a flushed resource that no scanout shows (the guest draws somewhere else)
+            let on: Vec<String> = self
+                .scanouts
+                .values()
+                .map(|s| s.resource_id.map_or("none".to_string(), |r| r.to_string()))
+                .collect();
+            super::gvm_scanout::note(
+                "FLUSH-OFFSCREEN",
+                resource_id.map_or(0, |r| r.get()),
+                &format!("is flushed but not on a scanout (scanouts show {})", on.join(",")),
+            );
         }
         if self.cursor_scanout.resource_id == resource_id {
             self.cursor_scanout
@@ -1432,6 +1447,20 @@ impl VirtioGpu {
             .resources
             .get_mut(&resource_id)
             .ok_or(ErrInvalidResourceId)?;
+
+        if let SurfaceType::Scanout = scanout_type {
+            // iceland gvm: which resource each scanout shows (Xorg / a compositor may switch it)
+            super::gvm_scanout::note(
+                "SET-SCANOUT",
+                resource_id,
+                &format!(
+                    "scanout {} blob={} rect={:?}",
+                    scanout_id,
+                    scanout_data.is_some() as u8,
+                    scanout_rect.as_ref().map(|r| (r.x.to_native(), r.y.to_native(), r.width.to_native(), r.height.to_native()))
+                ),
+            );
+        }
 
         // Ensure scanout has a display surface.
         match scanout_type {
