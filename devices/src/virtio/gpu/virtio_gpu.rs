@@ -443,14 +443,21 @@ impl VirtioGpuScanout {
             .framebuffer_region(surface_id, 0, 0, self.width, self.height)
             .ok_or(ErrUnspec)?;
 
-        let mut transfer = Transfer3D::new_2d(0, 0, self.width, self.height, 0);
-        transfer.stride = fb.stride();
+        // iceland gvm: the upstream ctx0 transfer_read reads back a black frame on our GLES host;
+        // gvm_scanout picks a working source (ctx0 / dmabuf / guest backing), see gvm_scanout.rs.
+        let stride = fb.stride();
         let fb_slice = fb.as_volatile_slice();
-        let buf = IoSliceMut::new(
-            // SAFETY: trivially safe
-            unsafe { std::slice::from_raw_parts_mut(fb_slice.as_mut_ptr(), fb_slice.size()) },
+        // SAFETY: the slice covers the framebuffer region that the display handed out above.
+        let dst = unsafe { std::slice::from_raw_parts_mut(fb_slice.as_mut_ptr(), fb_slice.size()) };
+        super::gvm_scanout::fill(
+            rutabaga,
+            resource.resource_id,
+            resource.size > 0,
+            self.width,
+            self.height,
+            stride,
+            dst,
         );
-        rutabaga.transfer_read(0, resource.resource_id, transfer, Some(buf))?;
 
         display.flip(surface_id);
         Ok(OkNoData)
@@ -1038,7 +1045,10 @@ impl VirtioGpu {
             .ok_or(ErrInvalidResourceId)?;
 
         let rutabaga_iovecs = sglist_to_rutabaga_iovecs(&vecs[..], mem).map_err(|_| ErrUnspec)?;
+        let gvm_backing: Vec<(usize, usize)> =
+            rutabaga_iovecs.iter().map(|v| (v.base as usize, v.len)).collect();
         self.rutabaga.attach_backing(resource_id, rutabaga_iovecs)?;
+        super::gvm_scanout::set_backing(resource_id, &gvm_backing);
         resource.backing_iovecs = Some(vecs);
         Ok(OkNoData)
     }
@@ -1051,6 +1061,7 @@ impl VirtioGpu {
             .ok_or(ErrInvalidResourceId)?;
 
         self.rutabaga.detach_backing(resource_id)?;
+        super::gvm_scanout::forget(resource_id, false);
         resource.backing_iovecs = None;
         Ok(OkNoData)
     }
@@ -1079,6 +1090,7 @@ impl VirtioGpu {
             self.rutabaga.unmap(resource_id)?;
         }
 
+        super::gvm_scanout::forget(resource_id, true);
         self.rutabaga.unref_resource(resource_id)?;
         Ok(OkNoData)
     }

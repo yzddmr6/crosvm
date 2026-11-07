@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 mod edid;
+mod gvm_scanout;
 mod parameters;
 mod protocol;
 mod snapshot;
